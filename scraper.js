@@ -208,7 +208,6 @@ async function gotoDetail(page, browser, ipInfo) {
 }
 
 async function findM3U(dp, browser) {
-  // 策略：拦截网络请求 + 点击按钮
   console.log('在详情页查找"查看频道列表"按钮...');
   
   const channelBtn = await dp.evaluateHandle(() => {
@@ -224,108 +223,150 @@ async function findM3U(dp, browser) {
     return null;
   }
   
-  // 获取按钮 href
   const channelHref = await channelBtn.evaluate(el => el.href);
   console.log('频道列表按钮 href:', channelHref);
   
-  // 设置请求拦截，捕获频道列表 API 响应
-  let apiResponse = null;
-  dp.on('response', async (response) => {
-    const url = response.url();
-    if (url.includes('s=') || url.includes('channel') || url.includes('list') || url.includes('m3u')) {
-      try {
-        const text = await response.text();
-        console.log('拦截到响应:', url.substring(0, 100), '长度:', text.length);
-        if (text.includes('M3U') || text.includes('m3u') || text.includes('http')) {
-          apiResponse = { url, text };
-        }
-      } catch(e) {}
-    }
+  // 策略：用 page.goto 导航，设置正确的 Referer
+  const detailUrl = dp.url();
+  console.log('当前详情页URL:', detailUrl);
+  
+  // 设置额外的请求头（模拟从详情页点击）
+  await dp.setExtraHTTPHeaders({
+    'Referer': detailUrl,
+    'Origin': 'https://iptv.cqshushu.com'
   });
   
-  // 点击按钮
-  console.log('点击"查看频道列表"按钮...');
+  console.log('用 page.goto 导航到频道列表...');
   try {
-    await Promise.race([
-      channelBtn.click(),
-      sleep(15000)
-    ]);
+    await dp.goto(channelHref, { 
+      waitUntil: 'networkidle2', 
+      timeout: 30000,
+      referer: detailUrl
+    });
   } catch(e) {
-    console.log('点击警告:', e.message);
+    console.log('goto 超时:', e.message);
   }
   
-  // 等待响应
-  for (let w = 0; w < 10; w++) {
-    await sleep(2000);
-    if (apiResponse) {
-      console.log('从API响应中提取M3U...');
-      // 从响应中提取 M3U URL
-      const m3uMatch = apiResponse.text.match(/https?:\/\/[^\s<>"']+\.(m3u|m3u8)/i);
-      if (m3uMatch) {
-        console.log('找到M3U:', m3uMatch[0]);
-        return m3uMatch[0];
-      }
-      // 查找任何 http URL
-      const httpMatch = apiResponse.text.match(/https?:\/\/[^\s<>"']+/);
-      if (httpMatch) {
-        console.log('找到URL:', httpMatch[0]);
-        return httpMatch[0];
-      }
-      console.log('响应内容:', apiResponse.text.substring(0, 500));
+  await sleep(5000);
+  
+  let dpUrl = dp.url();
+  console.log('导航后URL:', dpUrl);
+  
+  const pageText = await dp.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+  console.log('页面内容:', pageText);
+  
+  if (pageText.includes('请求失败')) {
+    // 尝试用 CDP 的 fetch 直接请求
+    console.log('请求失败，尝试 CDP fetch...');
+    const cdpSession = await dp.target().createCDPSession();
+    const cookies = await dp.cookies();
+    const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    
+    try {
+      const result = await cdpSession.send('Fetch.enable');
+      console.log('CDP Fetch enabled');
+    } catch(e) {
+      console.log('CDP Fetch enable 失败:', e.message);
     }
     
-    // 检查页面是否跳转到了频道列表
-    const dpUrl = dp.url();
-    if (dpUrl.includes('s=') && !dpUrl.includes('p=')) {
-      // 页面跳转了，检查内容
-      const pageText = await dp.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-      if (!pageText.includes('请求失败')) {
-        console.log('频道列表页加载成功');
-        // 在页面中查找 M3U
-        const m3uUrl = await dp.evaluate(() => {
-          for (const l of document.querySelectorAll('a')) {
-            if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {
-              let h = l.href;
-              if (h && !h.startsWith('http')) h = new URL(h, window.location.origin).href;
-              if (h && !h.startsWith('javascript')) return h;
-            }
-          }
-          return null;
+    // 用 page.evaluate 内的 fetch 请求（自动携带 cookies）
+    const fetchResult = await dp.evaluate(async (url, referrer) => {
+      try {
+        const resp = await fetch(url, {
+          credentials: 'include',
+          headers: { 'Referer': referrer }
         });
-        if (m3uUrl) {
-          console.log('页面中找到M3U:', m3uUrl);
-          return m3uUrl;
+        const text = await resp.text();
+        return { status: resp.status, text: text.substring(0, 2000) };
+      } catch(e) {
+        return { error: e.message };
+      }
+    }, channelHref, detailUrl);
+    
+    console.log('Fetch 结果:', JSON.stringify(fetchResult).substring(0, 500));
+    
+    if (fetchResult && fetchResult.text && !fetchResult.text.includes('请求失败')) {
+      // 从 fetch 结果中提取 M3U
+      const m3uMatch = fetchResult.text.match(/https?:\/\/[^\s<>"']+\.(m3u|m3u8)/i);
+      if (m3uMatch) return m3uMatch[0];
+      
+      // 查找 M3U 相关链接
+      const m3uLinkMatch = fetchResult.text.match(/href=["']([^"']*m3u[^"']*)/i);
+      if (m3uLinkMatch) {
+        let href = m3uLinkMatch[1];
+        if (!href.startsWith('http')) href = 'https://iptv.cqshushu.com' + href;
+        return href;
+      }
+      
+      // 如果返回了 HTML，查找所有链接
+      const allLinkMatches = fetchResult.text.match(/href=["']([^"']+)/g);
+      if (allLinkMatches) {
+        for (const lm of allLinkMatches) {
+          const h = lm.replace(/href=["']/, '');
+          if (h.includes('m3u') || h.includes('M3U')) {
+            if (!h.startsWith('http')) return 'https://iptv.cqshushu.com' + h;
+            return h;
+          }
         }
       }
+      
+      console.log('Fetch 内容:', fetchResult.text.substring(0, 1000));
     }
+    
+    // 最后尝试：直接用 XMLHttpRequest
+    console.log('尝试 XMLHttpRequest...');
+    const xhrResult = await dp.evaluate(async (url, referrer) => {
+      return new Promise((resolve) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.setRequestHeader('Referer', referrer);
+        xhr.withCredentials = true;
+        xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText.substring(0, 2000) });
+        xhr.onerror = () => resolve({ error: 'network error' });
+        xhr.timeout = 15000;
+        xhr.ontimeout = () => resolve({ error: 'timeout' });
+        xhr.send();
+      });
+    }, channelHref, detailUrl);
+    
+    console.log('XHR 结果:', JSON.stringify(xhrResult).substring(0, 500));
+    
+    if (xhrResult && xhrResult.text && !xhrResult.text.includes('请求失败')) {
+      const m3uMatch = xhrResult.text.match(/https?:\/\/[^\s<>"']+\.(m3u|m3u8)/i);
+      if (m3uMatch) return m3uMatch[0];
+      
+      const m3uLinkMatch = xhrResult.text.match(/href=["']([^"']*m3u[^"']*)/i);
+      if (m3uLinkMatch) {
+        let href = m3uLinkMatch[1];
+        if (!href.startsWith('http')) href = 'https://iptv.cqshushu.com' + href;
+        return href;
+      }
+      
+      console.log('XHR 内容:', xhrResult.text.substring(0, 1000));
+    }
+    
+    return null;
   }
   
-  // 如果拦截方式没找到，尝试在新标签页中查找
-  const pages = await browser.pages();
-  for (const p of pages) {
-    const u = p.url();
-    if (u.includes('s=') && !u.includes('p=') && p !== dp) {
-      console.log('在新标签页找到频道列表:', u);
-      const pageText = await p.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-      console.log('新标签页内容:', pageText);
-      
-      if (!pageText.includes('请求失败')) {
-        const m3uUrl = await p.evaluate(() => {
-          for (const l of document.querySelectorAll('a')) {
-            if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {
-              let h = l.href;
-              if (h && !h.startsWith('http')) h = new URL(h, window.location.origin).href;
-              if (h && !h.startsWith('javascript')) return h;
-            }
-          }
-          return null;
-        });
-        if (m3uUrl) return m3uUrl;
+  // 页面加载成功，查找 M3U
+  console.log('频道列表页加载成功，查找M3U...');
+  const m3uUrl = await dp.evaluate(() => {
+    for (const l of document.querySelectorAll('a')) {
+      if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {
+        let h = l.href;
+        if (h && !h.startsWith('http')) h = new URL(h, window.location.origin).href;
+        if (h && !h.startsWith('javascript')) return h;
       }
     }
+    return null;
+  });
+  
+  if (m3uUrl) {
+    console.log('找到M3U:', m3uUrl);
+    return m3uUrl;
   }
   
-  console.log('未能获取M3U链接');
+  console.log('未找到M3U链接');
   return null;
 }
 

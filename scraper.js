@@ -155,14 +155,55 @@ async function main() {
           continue;
         }
 
-        // 等待TXT链接出现
+        // 等待详情页内容加载（可能需要点击"查看频道列表"）
+        // 详情页的频道列表和TXT下载可能是AJAX异步加载的
         try {
+          // 先等待基本内容
           await page.waitForFunction(() => {
             const body = document.body?.innerText || '';
-            return body.includes('TXT接口') || body.includes('TXT下载') || body.includes('download=txt');
-          }, { timeout: 10000 });
+            return body.includes('查看频道列表') || body.includes('TXT') || body.includes('下载');
+          }, { timeout: 15000 });
         } catch (e) {
-          console.log('  等待TXT链接超时');
+          console.log('  等待详情页基础内容超时');
+        }
+
+        await sleep(3000); // 额外等待AJAX
+
+        // 尝试点击"📺 查看频道列表"按钮（如果存在）
+        try {
+          const clickedChannelList = await page.evaluate(() => {
+            const links = document.querySelectorAll('a');
+            for (const a of links) {
+              if (a.textContent.includes('查看频道列表')) {
+                a.click();
+                return true;
+              }
+            }
+            return false;
+          });
+          if (clickedChannelList) {
+            console.log('  点击了"查看频道列表"');
+            await sleep(5000); // 等待频道列表加载
+          }
+        } catch (e) { }
+
+        // 滚动页面触发懒加载
+        await page.evaluate(() => window.scrollBy(0, 500));
+        await sleep(2000);
+
+        // 输出当前页面所有链接用于调试
+        const allLinksDebug = await page.evaluate(() => {
+          return Array.from(document.querySelectorAll('a')).map(a => ({
+            text: a.textContent.trim().substring(0, 40),
+            href: (a.getAttribute('href') || '').substring(0, 80),
+            onclick: (a.getAttribute('onclick') || '').substring(0, 80)
+          }));
+        });
+        console.log(`  当前页面链接 (${allLinksDebug.length}个):`);
+        for (const link of allLinksDebug) {
+          if (link.text || link.href || link.onclick) {
+            console.log(`    [${link.text}] href=${link.href} onclick=${link.onclick}`);
+          }
         }
 
         // 提取TXT接口URL

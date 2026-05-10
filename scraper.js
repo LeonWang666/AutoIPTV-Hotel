@@ -238,7 +238,7 @@ async function findM3U(dp, browser) {
   const channelHref = await channelBtn.evaluate(el => el.href);
   console.log('频道列表按钮 href:', channelHref);
   
-  // 方法1: 直接用 Puppeteer 点击
+  // Puppeteer 点击
   try {
     await Promise.race([
       channelBtn.click(),
@@ -252,35 +252,53 @@ async function findM3U(dp, browser) {
   
   // 检查是否跳转成功
   let channelPage = null;
-  const dpUrl = dp.url();
-  console.log('点击后详情页URL:', dpUrl);
+  let dpUrl = dp.url();
+  console.log('点击后URL:', dpUrl);
   
   if (dpUrl.includes('s=') && !dpUrl.includes('p=')) {
-    // 详情页已跳转到频道列表页
     channelPage = dp;
-    console.log('详情页已跳转到频道列表页');
-  } else {
-    // 点击没生效，尝试用 JS 导航
-    console.log('点击未跳转，尝试JS导航...');
-    if (channelHref) {
-      await dp.evaluate((href) => { window.location.href = href; }, channelHref);
-      await sleep(8000);
+    console.log('点击跳转成功');
+  }
+  
+  // 如果点击没跳转，用 page.goto 导航（保持 cookies）
+  if (!channelPage && channelHref) {
+    console.log('点击未跳转，用 page.goto 导航...');
+    try {
+      await dp.goto(channelHref, { waitUntil: 'networkidle2', timeout: 30000 });
+    } catch(e) {
+      console.log('goto 超时，继续检查:', e.message);
+    }
+    await sleep(5000);
+    
+    dpUrl = dp.url();
+    console.log('goto后URL:', dpUrl);
+    
+    // 检查页面内容
+    const pageText = await dp.evaluate(() => document.body?.innerText?.substring(0, 200) || '');
+    console.log('页面内容:', pageText);
+    
+    if (pageText.includes('请求失败')) {
+      // session 验证失败，尝试等待后刷新
+      console.log('请求失败，等待后刷新...');
+      await sleep(3000);
+      await dp.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(e => console.log('刷新超时'));
+      await sleep(5000);
       
-      const newDpUrl = dp.url();
-      console.log('JS导航后URL:', newDpUrl);
-      
-      if (newDpUrl.includes('s=')) {
-        channelPage = dp;
-      }
+      const pageText2 = await dp.evaluate(() => document.body?.innerText?.substring(0, 200) || '');
+      console.log('刷新后内容:', pageText2);
+    }
+    
+    if (dpUrl.includes('s=')) {
+      channelPage = dp;
     }
   }
   
-  // 如果还是没跳转，检查是否有新标签页
+  // 检查新标签页
   if (!channelPage) {
     const pages = await browser.pages();
     for (const p of pages) {
       const u = p.url();
-      if (u.includes('s=') && u.includes('t=multicast') && !u.includes('p=') && p !== dp) {
+      if (u.includes('s=') && !u.includes('p=') && p !== dp) {
         channelPage = p;
         break;
       }
@@ -288,10 +306,7 @@ async function findM3U(dp, browser) {
   }
   
   if (!channelPage) {
-    console.log('所有方法都未能进入频道列表页');
-    // 打印详情页内容用于调试
-    const detailText = await dp.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-    console.log('当前页面内容:', detailText);
+    console.log('未能进入频道列表页');
     return null;
   }
   

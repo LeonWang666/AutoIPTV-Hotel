@@ -100,41 +100,80 @@ async function main() {
       process.exit(0);
     }
 
-    // 关键步骤：逐个访问详情页，获取正确的TXT接口token
-    console.log('\n[3/4] 访问详情页获取TXT接口token...');
+    // 关键步骤：逐个点击IP链接进入详情页，获取正确的TXT接口token
+    console.log('\n[3/4] 点击IP链接进入详情页获取TXT接口token...');
     let bestContent = null;
     let bestCount = 0;
     let bestIP = '';
+
+    // 先回到首页（确保在首页）
+    await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
+    await waitForCF(page);
 
     for (let i = 0; i < validIPs.length && i < 3; i++) {
       const ip = validIPs[i];
       console.log(`\n尝试 ${i + 1}/3: ${ip.ip} (首页显示${ip.channelNum}个频道)`);
 
       try {
-        // 导航到详情页（用首页的gotoIP token）
-        const detailUrl = `https://iptv.cqshushu.com/index.php?p=${ip.token}&t=${ip.type}`;
-        console.log(`  详情页URL: ${detailUrl}`);
+        // 关键：模拟点击IP链接（而不是直接导航到URL）
+        // 这样浏览器会带上正确的referer和cookie
+        console.log('  点击IP链接...');
+        
+        // 找到对应的IP链接并点击
+        const clicked = await page.evaluate((targetIp) => {
+          const tables = document.querySelectorAll('table');
+          if (tables.length < 2) return false;
+          const rows = tables[1].querySelectorAll('tbody tr');
+          for (const row of rows) {
+            const a = row.querySelector('td a');
+            if (a && a.textContent.trim() === targetIp) {
+              a.click();
+              return true;
+            }
+          }
+          return false;
+        }, ip.ip);
 
-        await page.goto(detailUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        if (!clicked) {
+          console.log('  ❌ 未找到IP链接');
+          continue;
+        }
+
+        // 等待页面跳转（点击后会在当前页面跳转到详情页）
+        await page.waitForFunction(() => {
+          const url = window.location.href;
+          return url.includes('p=') && url.includes('t=');
+        }, { timeout: 15000 }).catch(() => null);
         await sleep(3000); // 等待详情页JS渲染
+
+        // 关闭可能弹出的广告窗口
+        const pages = await browser.pages();
+        for (const p of pages) {
+          if (p !== page) {
+            try { await p.close(); } catch (e) { }
+          }
+        }
 
         // 调试：输出详情页信息
         const debugInfo = await page.evaluate(() => ({
           url: window.location.href,
           title: document.title,
           linkCount: document.querySelectorAll('a').length,
-          bodyPreview: document.body?.innerText?.substring(0, 200) || '',
-          allOnclicks: Array.from(document.querySelectorAll('a[onclick]')).map(a => a.textContent.trim() + ' => ' + a.getAttribute('onclick').substring(0, 80)).slice(0, 10)
+          bodyPreview: document.body?.innerText?.substring(0, 200) || ''
         }));
-        console.log(`  详情页调试: URL=${debugInfo.url}`);
+        console.log(`  详情页: URL=${debugInfo.url}`);
         console.log(`  标题: ${debugInfo.title}`);
         console.log(`  链接数: ${debugInfo.linkCount}`);
-        console.log(`  内容预览: ${debugInfo.bodyPreview.substring(0, 100)}`);
-        if (debugInfo.allOnclicks.length > 0) {
-          console.log(`  onclick链接: ${debugInfo.allOnclicks.join(' | ')}`);
+        console.log(`  内容预览: ${debugInfo.bodyPreview.substring(0, 120)}`);
+
+        if (debugInfo.title.includes('验证失败') || debugInfo.bodyPreview.includes('请求失败')) {
+          console.log('  ❌ 详情页验证失败，回到首页重试');
+          await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
+          await waitForCF(page);
+          continue;
         }
 
-        // 等待详情页内容加载（等待"查看频道列表"或"TXT"出现）
+        // 等待详情页内容加载
         try {
           await page.waitForFunction(() => {
             const body = document.body?.innerText || '';
@@ -220,6 +259,13 @@ async function main() {
 
       } catch (err) {
         console.log(`  ❌ 访问失败: ${err.message}`);
+      }
+
+      // 回到首页准备下一次点击
+      if (i < validIPs.length - 1 && i < 2 && !bestContent) {
+        console.log('  回到首页...');
+        await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
+        await waitForCF(page);
       }
     }
 

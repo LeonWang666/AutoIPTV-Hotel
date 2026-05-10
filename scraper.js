@@ -109,11 +109,11 @@ function extractIPCode(filterNewOnline) {
       const ip = a.textContent.trim();
       const onclick = a.getAttribute('onclick') || '';
       const href = a.href || '';
-      const m = onclick.match(/gotoIP\('([^']+)','([^']+)'\)/);
+      const m = onclick.match(/gotoIP\(['"]([^'"]+)['"],\s*['"]([^'"]+)['"]\)/) || onclick.match(/gotoIP\(([^,]+),\s*([^)]+)\)/);
       let nav = 'click', token = null, type = 'multicast';
       if (m) { nav = 'gotoIP'; token = m[1]; type = m[2]; }
       else if (href && href.includes('iptv.cqshushu.com') && href !== window.location.href) { nav = 'href'; }
-      return { ip, token, type, nav, href, onclick: onclick.substring(0,100), status: cells.length >= 6 ? cells[5].textContent.trim() : '' };
+      return { ip, token, type, nav, href, onclick: onclick.substring(0,200), status: cells.length >= 6 ? cells[5].textContent.trim() : '' };
     }
     return null;
   };

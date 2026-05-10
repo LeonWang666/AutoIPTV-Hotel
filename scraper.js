@@ -248,9 +248,9 @@ async function findM3U(dp, browser) {
   let channelPage = null;
   for (let w = 0; w < 10; w++) {
     await sleep(3000);
-    const allPages = await browser.pages();
+    const pages = await browser.pages();
     
-    for (const p of allPages) {
+    for (const p of pages) {
       const u = p.url();
       // 查找频道列表页（URL 包含 s= 参数且不是详情页）
       if (u.includes('s=') && u.includes('t=multicast') && !u.includes('p=')) {
@@ -268,7 +268,14 @@ async function findM3U(dp, browser) {
     }
   }
   
+  if (!channelPage) {
+    // 最后尝试：使用当前详情页
+    console.log('未找到独立频道列表页，使用详情页');
+    channelPage = dp;
+  }
+  
   // 关闭广告页
+  const allPages = await browser.pages();
   for (const p of allPages) {
     const u = p.url();
     if (u.includes('eatcells') || u.includes('faithfuloccasion')) {

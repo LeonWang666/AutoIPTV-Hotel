@@ -256,51 +256,54 @@ async function findM3U(dp, browser) {
   console.log('页面内容:', pageText);
   
   if (pageText.includes('请求失败')) {
-    // 策略：在详情页上下文中用 JS fetch 请求频道列表
+    // 策略：在详情页上下文中用 window.open 打开频道列表
+    console.log('请求失败，尝试 window.open...');
+    
     // 先回到详情页
-    console.log('回到详情页，用 JS fetch 请求...');
     await dp.goto(detailUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await sleep(3000);
     
-    // 在详情页上下文中 fetch 频道列表
-    const fetchResult = await dp.evaluate(async (url) => {
+    // 用 window.open 打开频道列表（在新标签页中）
+    const newPageUrl = await dp.evaluate(async (url) => {
       try {
-        const resp = await fetch(url, { credentials: 'include' });
-        const text = await resp.text();
-        return { status: resp.status, ok: resp.ok, text: text.substring(0, 3000) };
+        const win = window.open(url, '_blank');
+        if (win) {
+          // 等待新窗口加载
+          await new Promise(r => setTimeout(r, 5000));
+          return win.location.href;
+        }
+        return null;
       } catch(e) {
-        return { error: e.message };
+        return null;
       }
     }, channelHref);
     
-    console.log('Fetch status:', fetchResult.status, 'ok:', fetchResult.ok);
+    console.log('window.open URL:', newPageUrl);
     
-    if (fetchResult.text) {
-      // 检查是否成功
-      if (fetchResult.text.includes('请求失败')) {
-        console.log('Fetch 也返回请求失败');
-        console.log('响应:', fetchResult.text.substring(0, 300));
-      } else {
-        console.log('Fetch 成功！内容:', fetchResult.text.substring(0, 500));
+    // 查找新标签页
+    await sleep(5000);
+    const pages = await browser.pages();
+    for (const p of pages) {
+      const u = p.url();
+      if (u.includes('s=') && !u.includes('p=') && p !== dp) {
+        console.log('新标签页URL:', u);
+        const pText = await p.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+        console.log('新标签页内容:', pText);
         
-        // 提取 M3U 链接
-        const m3uMatch = fetchResult.text.match(/https?:\/\/[^\s<>"']+\.(m3u|m3u8)/i);
-        if (m3uMatch) return m3uMatch[0];
-        
-        const m3uLinkMatch = fetchResult.text.match(/href=["']([^"']*m3u[^"']*)/i);
-        if (m3uLinkMatch) {
-          let href = m3uLinkMatch[1];
-          if (!href.startsWith('http')) href = new URL(href, 'https://iptv.cqshushu.com').href;
-          return href;
+        if (!pText.includes('请求失败') && !pText.includes('验证失败')) {
+          // 找到了！查找 M3U
+          const m3uUrl = await p.evaluate(() => {
+            for (const l of document.querySelectorAll('a')) {
+              if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {
+                let h = l.href;
+                if (h && !h.startsWith('http')) h = new URL(h, window.location.origin).href;
+                if (h && !h.startsWith('javascript')) return h;
+              }
+            }
+            return null;
+          });
+          if (m3uUrl) return m3uUrl;
         }
-        
-        // 查找 onclick 中的 M3U 复制功能
-        const copyMatch = fetchResult.text.match(/copy\(['"]([^'"]+)['"]\)/i);
-        if (copyMatch) return copyMatch[1];
-        
-        // 查找任何包含 http 的内容
-        const httpMatch = fetchResult.text.match(/https?:\/\/[^\s<>"']+/);
-        if (httpMatch) return httpMatch[0];
       }
     }
     

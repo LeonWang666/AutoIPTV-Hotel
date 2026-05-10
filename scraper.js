@@ -208,124 +208,61 @@ async function gotoDetail(page, browser, ipInfo) {
 }
 
 async function findM3U(dp, browser) {
-  console.log('在详情页查找"查看频道列表"按钮...');
+  console.log('在详情页查找M3U相关信息...');
   
-  const channelBtn = await dp.evaluateHandle(() => {
-    const links = document.querySelectorAll('a');
-    for (const l of links) {
-      if (l.textContent.includes('查看频道列表') || l.textContent.includes('频道列表')) return l;
-    }
-    return null;
-  });
+  // 先打印详情页完整内容用于分析
+  const detailHtml = await dp.evaluate(() => document.documentElement.innerHTML);
+  console.log('详情页HTML长度:', detailHtml.length);
   
-  if (!channelBtn) {
-    console.log('未找到"查看频道列表"按钮');
-    return null;
+  // 查找所有包含 M3U 或 m3u 的内容
+  const m3uMatches = detailHtml.match(/m3u[^"'<>\s]*/gi);
+  if (m3uMatches) {
+    console.log('找到M3U相关:', m3uMatches.slice(0, 10));
   }
   
-  const channelHref = await channelBtn.evaluate(el => el.href);
-  console.log('频道列表按钮 href:', channelHref);
-  
-  // 策略：用 page.goto 导航，设置正确的 Referer
-  const detailUrl = dp.url();
-  console.log('当前详情页URL:', detailUrl);
-  
-  // 设置额外的请求头（模拟从详情页点击）
-  await dp.setExtraHTTPHeaders({
-    'Referer': detailUrl,
-    'Origin': 'https://iptv.cqshushu.com'
-  });
-  
-  console.log('用 page.goto 导航到频道列表...');
-  try {
-    await dp.goto(channelHref, { 
-      waitUntil: 'networkidle2', 
-      timeout: 30000,
-      referer: detailUrl
-    });
-  } catch(e) {
-    console.log('goto 超时:', e.message);
+  // 查找所有 onclick 中包含 copy 的内容（可能是复制M3U链接）
+  const copyMatches = detailHtml.match(/copy\(['"]([^'"]+)['"]\)/gi);
+  if (copyMatches) {
+    console.log('找到copy函数:', copyMatches.slice(0, 5));
+    // 提取第一个copy的参数作为M3U链接
+    const firstMatch = copyMatches[0].match(/copy\(['"]([^'"]+)['"]\)/);
+    if (firstMatch) {
+      console.log('从copy提取M3U:', firstMatch[1]);
+      return firstMatch[1];
+    }
   }
   
-  await sleep(5000);
-  
-  let dpUrl = dp.url();
-  console.log('导航后URL:', dpUrl);
-  
-  const pageText = await dp.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-  console.log('页面内容:', pageText);
-  
-  if (pageText.includes('请求失败')) {
-    // 策略：在详情页上下文中用 window.open 打开频道列表
-    console.log('请求失败，尝试 window.open...');
-    
-    // 先回到详情页
-    await dp.goto(detailUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    await sleep(3000);
-    
-    // 用 window.open 打开频道列表（在新标签页中）
-    const newPageUrl = await dp.evaluate(async (url) => {
-      try {
-        const win = window.open(url, '_blank');
-        if (win) {
-          // 等待新窗口加载
-          await new Promise(r => setTimeout(r, 5000));
-          return win.location.href;
-        }
-        return null;
-      } catch(e) {
-        return null;
-      }
-    }, channelHref);
-    
-    console.log('window.open URL:', newPageUrl);
-    
-    // 查找新标签页
-    await sleep(5000);
-    const pages = await browser.pages();
-    for (const p of pages) {
-      const u = p.url();
-      if (u.includes('s=') && !u.includes('p=') && p !== dp) {
-        console.log('新标签页URL:', u);
-        const pText = await p.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-        console.log('新标签页内容:', pText);
-        
-        if (!pText.includes('请求失败') && !pText.includes('验证失败')) {
-          // 找到了！查找 M3U
-          const m3uUrl = await p.evaluate(() => {
-            for (const l of document.querySelectorAll('a')) {
-              if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {
-                let h = l.href;
-                if (h && !h.startsWith('http')) h = new URL(h, window.location.origin).href;
-                if (h && !h.startsWith('javascript')) return h;
-              }
-            }
-            return null;
-          });
-          if (m3uUrl) return m3uUrl;
-        }
+  // 查找所有 href 中包含 http 的链接
+  const httpMatches = detailHtml.match(/href=["'](https?:\/\/[^"']+)["']/gi);
+  if (httpMatches) {
+    console.log('找到http链接:', httpMatches.slice(0, 5));
+    for (const match of httpMatches) {
+      const url = match.replace(/href=["']/, '').replace(/["']$/, '');
+      if (url.includes('m3u') || url.includes('M3U')) {
+        console.log('找到M3U链接:', url);
+        return url;
       }
     }
-    
-    return null;
   }
   
-  // 页面加载成功，查找 M3U
-  console.log('频道列表页加载成功，查找M3U...');
-  const m3uUrl = await dp.evaluate(() => {
-    for (const l of document.querySelectorAll('a')) {
-      if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {
-        let h = l.href;
-        if (h && !h.startsWith('http')) h = new URL(h, window.location.origin).href;
-        if (h && !h.startsWith('javascript')) return h;
-      }
-    }
-    return null;
-  });
-  
-  if (m3uUrl) {
-    console.log('找到M3U:', m3uUrl);
-    return m3uUrl;
+  // 查找详情页中的 IP:端口信息，构造可能的M3U URL
+  const ipPortMatch = detailHtml.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{4,5})/);
+  if (ipPortMatch) {
+    const ipPort = ipPortMatch[1];
+    console.log('找到IP端口:', ipPort);
+    
+    // 尝试构造常见的M3U路径
+    const possibleUrls = [
+      `http://${ipPort}/`,
+      `http://${ipPort}/playlist.m3u`,
+      `http://${ipPort}/channels.m3u`,
+      `http://${ipPort}/list.m3u`,
+      `http://${ipPort}/tv.m3u`,
+    ];
+    
+    // 返回第一个作为候选
+    console.log('可能的M3U地址:', possibleUrls[0]);
+    return possibleUrls[0];
   }
   
   console.log('未找到M3U链接');

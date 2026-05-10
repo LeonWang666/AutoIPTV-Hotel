@@ -150,7 +150,26 @@ async function findIP(page) {
 async function gotoDetail(page, browser, ipInfo) {
   if (ipInfo.nav === 'gotoIP' && ipInfo.token) {
     await page.evaluate((t, ty) => { if (typeof gotoIP === 'function') gotoIP(t, ty); }, ipInfo.token, ipInfo.type);
-    await sleep(8000);
+    // 等待新标签页打开
+    console.log('等待新标签页...');
+    for (let w = 0; w < 5; w++) {
+      await sleep(3000);
+      const pages = await browser.pages();
+      console.log(`  ${w+1}/5: ${pages.length} 个标签页`);
+      for (const p of pages) {
+        const u = p.url();
+        console.log(`    ${u.substring(0, 100)}`);
+      }
+      // 查找非广告、非首页的标签页
+      for (const p of pages) {
+        const u = p.url();
+        if (u.includes('iptv.cqshushu.com') && !u.includes('eatcells') && !u.includes('faithfuloccasion') && u !== 'about:blank' && p !== page) {
+          // 关闭广告页
+          for (const ad of pages) { if (ad.url().includes('eatcells') || ad.url().includes('faithfuloccasion')) { try { await ad.close(); } catch(e){} } }
+          return p;
+        }
+      }
+    }
   } else if (ipInfo.nav === 'href' && ipInfo.href) {
     console.log('导航到:', ipInfo.href);
     await page.goto(ipInfo.href, { waitUntil: 'networkidle2', timeout: 30000 });

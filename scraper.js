@@ -1,8 +1,9 @@
 /**
- * IPTV TXT 接口自动抓取脚本 v6
+ * IPTV TXT 接口自动抓取脚本 v7
  * puppeteer-extra + stealth 绕过 Cloudflare
  * 直接从首页获取token，构造TXT接口链接
  * 用Puppeteer访问TXT链接验证内容包含频道地址
+ * 如果频道数为0则跳过该IP，尝试下一个
  */
 
 const puppeteer = require('puppeteer-extra');
@@ -41,51 +42,51 @@ async function main() {
     await waitForCF(page);
     console.log('CF 验证已通过');
 
-    // 查找IP和token
-    console.log('[4/6] 查找新上线IP...');
-    let ipInfo = await findIP(page);
-    if (!ipInfo) throw new Error('未找到可用IP');
-    console.log(`目标: ${ipInfo.ip}, token: ${ipInfo.token}, 状态: ${ipInfo.status}`);
+    // 查找所有IP（优先新上线）
+    console.log('[4/6] 查找可用IP...');
+    const allIPs = await findAllIPs(page);
+    if (allIPs.length === 0) throw new Error('未找到任何IP');
+    console.log(`找到 ${allIPs.length} 个IP`);
 
-    // 构造TXT链接
-    // 格式: http://iptv.cqshushu.com/index.php?s=<token>&t=multicast&channels=1&format=txt
-    if (!ipInfo.token) throw new Error('未获取到token，无法构造TXT链接');
-    const txtUrl = `http://iptv.cqshushu.com/index.php?s=${ipInfo.token}&t=multicast&channels=1&format=txt`;
-    console.log('[5/6] 构造TXT链接:', txtUrl);
+    // 逐个尝试，找到有频道的IP
+    let bestResult = null;
+    for (let i = 0; i < Math.min(allIPs.length, 10); i++) {
+      const ipInfo = allIPs[i];
+      if (!ipInfo.token) {
+        console.log(`  #${i+1} ${ipInfo.ip}: 无token，跳过`);
+        continue;
+      }
+      const txtUrl = `http://iptv.cqshushu.com/index.php?s=${ipInfo.token}&t=multicast&channels=1&format=txt`;
+      console.log(`  #${i+1} ${ipInfo.ip} (${ipInfo.status}): 验证TXT...`);
 
-    // 用Puppeteer访问TXT链接验证内容
-    console.log('验证TXT链接内容...');
-    const txtPage = await browser.newPage();
-    await txtPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36');
-    
-    try {
-      await txtPage.goto(txtUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    } catch(e) {
-      // networkidle2可能超时，但内容可能已加载
-      console.log('页面加载超时，尝试继续...');
+      const channelCount = await verifyTxtContent(page, txtUrl);
+      console.log(`  #${i+1} ${ipInfo.ip}: ${channelCount} 个频道`);
+
+      if (channelCount > 0) {
+        bestResult = { txtUrl, ip: ipInfo.ip, channelCount, status: ipInfo.status };
+        console.log(`找到有效IP: ${ipInfo.ip}, ${channelCount} 个频道`);
+        break;
+      }
     }
-    
-    await sleep(3000);
-    
-    const txtContent = await txtPage.evaluate(() => document.body?.innerText || '');
-    console.log('TXT内容长度:', txtContent.length);
-    console.log('TXT前200字符:', txtContent.substring(0, 200));
-    
-    // 验证内容是否包含频道地址格式
-    const channelPattern = /http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+\/rtp\//;
-    const channelCount = (txtContent.match(/http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+/g) || []).length;
-    console.log('频道地址数量:', channelCount);
-    
-    if (channelCount === 0) {
-      console.log('警告: TXT内容未检测到频道地址，内容:', txtContent.substring(0, 500));
-      // 不抛错，仍然保存链接（可能是网络问题导致内容未加载）
+
+    if (!bestResult) {
+      // 如果所有IP都没有频道，使用第一个有token的IP（可能暂时不可用）
+      const fallback = allIPs.find(ip => ip.token);
+      if (fallback) {
+        const txtUrl = `http://iptv.cqshushu.com/index.php?s=${fallback.token}&t=multicast&channels=1&format=txt`;
+        bestResult = { txtUrl, ip: fallback.ip, channelCount: 0, status: fallback.status };
+        console.log('警告: 所有IP频道数为0，使用第一个:', fallback.ip);
+      } else {
+        throw new Error('所有IP均无有效token和频道');
+      }
     }
-    
-    await txtPage.close();
+
+    console.log('[5/6] 最终TXT链接:', bestResult.txtUrl);
+    console.log(`  IP: ${bestResult.ip}, 频道数: ${bestResult.channelCount}`);
 
     // 保存KV
     console.log('[6/6] 保存KV...');
-    await saveKV(txtUrl, ipInfo.ip, channelCount);
+    await saveKV(bestResult.txtUrl, bestResult.ip, bestResult.channelCount);
     console.log('=== 成功 ===');
 
   } catch (error) {
@@ -102,37 +103,36 @@ async function main() {
   }
 }
 
-// 提取IP信息的浏览器函数
-function extractIPCode(filterNewOnline) {
-  return (filter) => {
+// 提取所有IP信息
+function extractAllIPsCode() {
+  return () => {
     const tables = document.querySelectorAll('table');
-    if (tables.length < 2) return null;
+    if (tables.length < 2) return [];
     const rows = tables[1].querySelectorAll('tbody tr');
+    const results = [];
     for (let i = 0; i < rows.length; i++) {
       const cells = rows[i].querySelectorAll('td');
       if (cells.length < 1) continue;
-      if (filter && (cells.length < 6 || cells[5].textContent.trim() !== '新上线')) continue;
       const a = cells[0].querySelector('a');
       if (!a) continue;
       const ip = a.textContent.trim();
       const onclick = a.getAttribute('onclick') || '';
-      const href = a.href || '';
       const m = onclick.match(/gotoIP\(['"]([^'"]+)['"],\s*['"]([^'"]+)['"]\)/) || onclick.match(/gotoIP\(([^,]+),\s*([^)]+)\)/);
-      let nav = 'click', token = null, type = 'multicast';
-      if (m) { nav = 'gotoIP'; token = m[1]; type = m[2]; }
-      else if (href && href.includes('iptv.cqshushu.com') && href !== window.location.href) { nav = 'href'; }
-      return { ip, token, type, nav, href, onclick: onclick.substring(0,200), status: cells.length >= 6 ? cells[5].textContent.trim() : '' };
+      let token = null, type = 'multicast';
+      if (m) { token = m[1]; type = m[2]; }
+      const status = cells.length >= 6 ? cells[5].textContent.trim() : '';
+      results.push({ ip, token, type, status });
     }
-    return null;
+    return results;
   };
 }
 
-async function findIP(page) {
-  // 找新上线
-  let info = await page.evaluate(extractIPCode(true), true);
-  if (info) { console.log('找到新上线:', info.ip); return info; }
+async function findAllIPs(page) {
+  // 先收集第1页的IP
+  let allIPs = await page.evaluate(extractAllIPsCode());
+  console.log(`第1页: ${allIPs.length} 个IP`);
 
-  // 翻页
+  // 翻页收集更多IP
   for (let p = 2; p <= 3; p++) {
     console.log(`翻第${p}页...`);
     const clicked = await page.evaluate((pn) => {
@@ -142,17 +142,47 @@ async function findIP(page) {
     }, p);
     if (!clicked) break;
     await sleep(3000);
-    info = await page.evaluate(extractIPCode(true), true);
-    if (info) { console.log(`第${p}页找到:`, info.ip); return info; }
+    const pageIPs = await page.evaluate(extractAllIPsCode());
+    console.log(`第${p}页: ${pageIPs.length} 个IP`);
+    allIPs = allIPs.concat(pageIPs);
   }
 
-  // 回第1页取第一个
-  console.log('用第一个IP...');
-  await page.evaluate(() => { for (const l of document.querySelectorAll('a')) { if (l.textContent.trim() === '1') { l.click(); return; } } });
-  await sleep(2000);
-  info = await page.evaluate(extractIPCode(false), false);
-  if (info) console.log('使用:', info.ip, info.nav, 'status:', info.status);
-  return info;
+  // 排序：新上线优先，然后有token的优先
+  allIPs.sort((a, b) => {
+    if (a.status === '新上线' && b.status !== '新上线') return -1;
+    if (a.status !== '新上线' && b.status === '新上线') return 1;
+    if (a.token && !b.token) return -1;
+    if (!a.token && b.token) return 1;
+    return 0;
+  });
+
+  return allIPs;
+}
+
+// 在同一个page中验证TXT链接内容（保持session cookie）
+async function verifyTxtContent(page, txtUrl) {
+  try {
+    await page.goto(txtUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  } catch(e) {
+    console.log('  页面加载超时，尝试继续...');
+  }
+  await sleep(3000);
+
+  const txtContent = await page.evaluate(() => document.body?.innerText || '');
+  if (!txtContent || txtContent.length < 10) return 0;
+
+  // 统计频道地址数量
+  const channelCount = (txtContent.match(/http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+/g) || []).length;
+
+  // 也检查节目数量字段
+  const countMatch = txtContent.match(/#节目数量[：:]\s*(\d+)/);
+  if (countMatch) {
+    const declaredCount = parseInt(countMatch[1]);
+    console.log(`  页面声明节目数量: ${declaredCount}`);
+    return Math.max(channelCount, declaredCount);
+  }
+
+  return channelCount;
 }
 
 async function waitForCF(page) {

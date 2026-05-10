@@ -94,16 +94,16 @@ async function main() {
   }
 }
 
-// 提取IP信息的浏览器函数
+// 提取IP信息的浏览器函数（参数通过 evaluate 传入）
 function extractIPCode(filterNewOnline) {
-  return () => {
+  return (filter) => {
     const tables = document.querySelectorAll('table');
     if (tables.length < 2) return null;
     const rows = tables[1].querySelectorAll('tbody tr');
     for (let i = 0; i < rows.length; i++) {
       const cells = rows[i].querySelectorAll('td');
       if (cells.length < 1) continue;
-      if (filterNewOnline && (cells.length < 6 || cells[5].textContent.trim() !== '新上线')) continue;
+      if (filter && (cells.length < 6 || cells[5].textContent.trim() !== '新上线')) continue;
       const a = cells[0].querySelector('a');
       if (!a) continue;
       const ip = a.textContent.trim();
@@ -121,7 +121,7 @@ function extractIPCode(filterNewOnline) {
 
 async function findIP(page) {
   // 找新上线
-  let info = await page.evaluate(extractIPCode(true));
+  let info = await page.evaluate(extractIPCode(true), true);
   if (info) { console.log('找到新上线:', info.ip); return info; }
 
   // 翻页
@@ -134,7 +134,7 @@ async function findIP(page) {
     }, p);
     if (!clicked) break;
     await sleep(3000);
-    info = await page.evaluate(extractIPCode(true));
+    info = await page.evaluate(extractIPCode(true), true);
     if (info) { console.log(`第${p}页找到:`, info.ip); return info; }
   }
 
@@ -142,7 +142,7 @@ async function findIP(page) {
   console.log('用第一个IP...');
   await page.evaluate(() => { for (const l of document.querySelectorAll('a')) { if (l.textContent.trim() === '1') { l.click(); return; } } });
   await sleep(2000);
-  info = await page.evaluate(extractIPCode(false));
+  info = await page.evaluate(extractIPCode(false), false);
   if (info) console.log('使用:', info.ip, info.nav, 'status:', info.status);
   return info;
 }

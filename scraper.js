@@ -256,93 +256,52 @@ async function findM3U(dp, browser) {
   console.log('页面内容:', pageText);
   
   if (pageText.includes('请求失败')) {
-    // 尝试用 CDP 的 fetch 直接请求
-    console.log('请求失败，尝试 CDP fetch...');
-    const cdpSession = await dp.target().createCDPSession();
-    const cookies = await dp.cookies();
-    const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    // 策略：在详情页上下文中用 JS fetch 请求频道列表
+    // 先回到详情页
+    console.log('回到详情页，用 JS fetch 请求...');
+    await dp.goto(detailUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    await sleep(3000);
     
-    try {
-      const result = await cdpSession.send('Fetch.enable');
-      console.log('CDP Fetch enabled');
-    } catch(e) {
-      console.log('CDP Fetch enable 失败:', e.message);
-    }
-    
-    // 用 page.evaluate 内的 fetch 请求（自动携带 cookies）
-    const fetchResult = await dp.evaluate(async (url, referrer) => {
+    // 在详情页上下文中 fetch 频道列表
+    const fetchResult = await dp.evaluate(async (url) => {
       try {
-        const resp = await fetch(url, {
-          credentials: 'include',
-          headers: { 'Referer': referrer }
-        });
+        const resp = await fetch(url, { credentials: 'include' });
         const text = await resp.text();
-        return { status: resp.status, text: text.substring(0, 2000) };
+        return { status: resp.status, ok: resp.ok, text: text.substring(0, 3000) };
       } catch(e) {
         return { error: e.message };
       }
-    }, channelHref, detailUrl);
+    }, channelHref);
     
-    console.log('Fetch 结果:', JSON.stringify(fetchResult).substring(0, 500));
+    console.log('Fetch status:', fetchResult.status, 'ok:', fetchResult.ok);
     
-    if (fetchResult && fetchResult.text && !fetchResult.text.includes('请求失败')) {
-      // 从 fetch 结果中提取 M3U
-      const m3uMatch = fetchResult.text.match(/https?:\/\/[^\s<>"']+\.(m3u|m3u8)/i);
-      if (m3uMatch) return m3uMatch[0];
-      
-      // 查找 M3U 相关链接
-      const m3uLinkMatch = fetchResult.text.match(/href=["']([^"']*m3u[^"']*)/i);
-      if (m3uLinkMatch) {
-        let href = m3uLinkMatch[1];
-        if (!href.startsWith('http')) href = 'https://iptv.cqshushu.com' + href;
-        return href;
-      }
-      
-      // 如果返回了 HTML，查找所有链接
-      const allLinkMatches = fetchResult.text.match(/href=["']([^"']+)/g);
-      if (allLinkMatches) {
-        for (const lm of allLinkMatches) {
-          const h = lm.replace(/href=["']/, '');
-          if (h.includes('m3u') || h.includes('M3U')) {
-            if (!h.startsWith('http')) return 'https://iptv.cqshushu.com' + h;
-            return h;
-          }
+    if (fetchResult.text) {
+      // 检查是否成功
+      if (fetchResult.text.includes('请求失败')) {
+        console.log('Fetch 也返回请求失败');
+        console.log('响应:', fetchResult.text.substring(0, 300));
+      } else {
+        console.log('Fetch 成功！内容:', fetchResult.text.substring(0, 500));
+        
+        // 提取 M3U 链接
+        const m3uMatch = fetchResult.text.match(/https?:\/\/[^\s<>"']+\.(m3u|m3u8)/i);
+        if (m3uMatch) return m3uMatch[0];
+        
+        const m3uLinkMatch = fetchResult.text.match(/href=["']([^"']*m3u[^"']*)/i);
+        if (m3uLinkMatch) {
+          let href = m3uLinkMatch[1];
+          if (!href.startsWith('http')) href = new URL(href, 'https://iptv.cqshushu.com').href;
+          return href;
         }
+        
+        // 查找 onclick 中的 M3U 复制功能
+        const copyMatch = fetchResult.text.match(/copy\(['"]([^'"]+)['"]\)/i);
+        if (copyMatch) return copyMatch[1];
+        
+        // 查找任何包含 http 的内容
+        const httpMatch = fetchResult.text.match(/https?:\/\/[^\s<>"']+/);
+        if (httpMatch) return httpMatch[0];
       }
-      
-      console.log('Fetch 内容:', fetchResult.text.substring(0, 1000));
-    }
-    
-    // 最后尝试：直接用 XMLHttpRequest
-    console.log('尝试 XMLHttpRequest...');
-    const xhrResult = await dp.evaluate(async (url, referrer) => {
-      return new Promise((resolve) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('GET', url, true);
-        xhr.setRequestHeader('Referer', referrer);
-        xhr.withCredentials = true;
-        xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText.substring(0, 2000) });
-        xhr.onerror = () => resolve({ error: 'network error' });
-        xhr.timeout = 15000;
-        xhr.ontimeout = () => resolve({ error: 'timeout' });
-        xhr.send();
-      });
-    }, channelHref, detailUrl);
-    
-    console.log('XHR 结果:', JSON.stringify(xhrResult).substring(0, 500));
-    
-    if (xhrResult && xhrResult.text && !xhrResult.text.includes('请求失败')) {
-      const m3uMatch = xhrResult.text.match(/https?:\/\/[^\s<>"']+\.(m3u|m3u8)/i);
-      if (m3uMatch) return m3uMatch[0];
-      
-      const m3uLinkMatch = xhrResult.text.match(/href=["']([^"']*m3u[^"']*)/i);
-      if (m3uLinkMatch) {
-        let href = m3uLinkMatch[1];
-        if (!href.startsWith('http')) href = 'https://iptv.cqshushu.com' + href;
-        return href;
-      }
-      
-      console.log('XHR 内容:', xhrResult.text.substring(0, 1000));
     }
     
     return null;

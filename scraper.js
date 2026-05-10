@@ -191,7 +191,7 @@ async function gotoDetail(page, browser, ipInfo) {
       if (u.includes('iptv.cqshushu.com') && 
           !u.includes('eatcells') && !u.includes('faithfuloccasion') && 
           u !== 'about:blank' && 
-          !u.includes('index.php') &&  // 排除首页
+          !u.includes('_js=1') &&  // 排除首页（_js=1 是首页标志）
           p !== page) {
         for (const ad of pages) { if (ad.url().includes('eatcells') || ad.url().includes('faithfuloccasion')) { try { await ad.close(); } catch(e){} } }
         return p;
@@ -199,7 +199,7 @@ async function gotoDetail(page, browser, ipInfo) {
     }
     // 也检查当前页是否已跳转
     const curUrl = page.url();
-    if (!curUrl.includes('index.php') && curUrl.includes('iptv.cqshushu.com')) {
+    if (!curUrl.includes('_js=1') && curUrl.includes('iptv.cqshushu.com') && curUrl.includes('p=')) {
       return page;
     }
   }

@@ -225,15 +225,35 @@ async function findM3U(dp) {
   if (chUrl) {
     console.log('进频道列表:', chUrl);
     await dp.goto(chUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    await sleep(3000);
-    // 调试：打印页面所有链接
-    const allLinks = await dp.evaluate(() => {
-      return Array.from(document.querySelectorAll('a')).map(l => ({
-        text: l.textContent.trim().substring(0, 50),
-        href: l.href.substring(0, 150)
-      })).filter(l => l.href.startsWith('http'));
+    // 等待更长时间让 JS 加载
+    await sleep(5000);
+    
+    // 调试：打印页面完整内容
+    const pageContent = await dp.evaluate(() => document.body?.innerText?.substring(0, 1000) || '');
+    console.log('频道列表页内容:', pageContent);
+    
+    // 查找所有可能的元素（a, button, 以及包含 m3u 关键字的任何元素）
+    const allElements = await dp.evaluate(() => {
+      const results = [];
+      // 查找所有 a 标签
+      document.querySelectorAll('a').forEach(l => {
+        results.push({ type: 'a', text: l.textContent.trim().substring(0, 50), href: l.href });
+      });
+      // 查找所有 button
+      document.querySelectorAll('button').forEach(b => {
+        results.push({ type: 'button', text: b.textContent.trim().substring(0, 50), onclick: b.getAttribute('onclick') || '' });
+      });
+      // 查找所有包含 m3u/M3U 关键字的元素
+      document.querySelectorAll('*').forEach(el => {
+        const text = el.textContent || '';
+        if ((text.includes('M3U') || text.includes('m3u')) && el.children.length === 0) {
+          results.push({ type: el.tagName, text: text.substring(0, 100), href: el.href || el.getAttribute('data-url') || '' });
+        }
+      });
+      return results;
     });
-    console.log('频道列表页链接:', JSON.stringify(allLinks, null, 2));
+    console.log('页面元素:', JSON.stringify(allElements, null, 2));
+    
     url = await dp.evaluate(() => {
       for (const l of document.querySelectorAll('a')) {
         if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {

@@ -209,8 +209,27 @@ async function gotoDetail(page, browser, ipInfo) {
 async function findM3U(dp) {
   // 先在详情页查找 M3U 链接
   console.log('在详情页查找M3U...');
-  const detailContent = await dp.evaluate(() => document.body?.innerText?.substring(0, 1500) || '');
-  console.log('详情页内容:', detailContent);
+  const detailContent = await dp.evaluate(() => document.body?.innerText || '');
+  
+  // 提取 IP:端口
+  const ipPortMatch = detailContent.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{4,5})/);
+  if (ipPortMatch) {
+    const ipPort = ipPortMatch[1];
+    console.log('找到IP端口:', ipPort);
+    
+    // 尝试常见的 M3U 路径
+    const possibleUrls = [
+      `http://${ipPort}/`,
+      `http://${ipPort}/playlist.m3u`,
+      `http://${ipPort}/channels.m3u`,
+      `http://${ipPort}/list.m3u`,
+      `http://${ipPort}/tv.m3u`,
+    ];
+    
+    // 先返回 IP:端口，让用户自己测试
+    console.log('可能的M3U地址:', possibleUrls.join(', '));
+    return `http://${ipPort}/`;  // 返回基础 URL
+  }
   
   // 查找详情页的所有链接
   const detailLinks = await dp.evaluate(() => {

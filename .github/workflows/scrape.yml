@@ -1,0 +1,38 @@
+name: IPTV M3U Scraper
+
+on:
+  schedule:
+    # 每小时运行一次
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    # 允许手动触发
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Puppeteer
+        run: |
+          npm install puppeteer
+
+      - name: Run scraper
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          node scraper.js
+
+      - name: Log result
+        if: always()
+        run: |
+          echo "=== 抓取完成 ==="
+          echo "完成时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"

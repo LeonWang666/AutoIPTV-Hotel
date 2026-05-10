@@ -1,8 +1,9 @@
 /**
- * IPTV TXT 接口自动抓取脚本 v8
+ * IPTV TXT 接口自动抓取脚本 v9
  * puppeteer-extra + stealth 绕过 Cloudflare
- * 从首页获取所有IP的token，构造TXT链接
- * 在同一标签页验证TXT内容，如果0频道则回首页尝试下一个
+ * 从首页获取所有Multicast IP的token，选择节目数最多的新上线IP
+ * 直接构造TXT链接保存（不验证TXT内容，因为GitHub Actions服务器可能无法访问组播源）
+ * 用户在自己网络环境下打开TXT链接即可获取频道列表
  */
 
 const puppeteer = require('puppeteer-extra');
@@ -21,7 +22,7 @@ async function main() {
 
   let browser;
   try {
-    console.log('[1/6] 启动浏览器...');
+    console.log('[1/4] 启动浏览器...');
     browser = await puppeteer.launch({
       headless: 'new',
       protocolTimeout: 180000,
@@ -33,20 +34,20 @@ async function main() {
     await page.setViewport({ width: 1920, height: 1080 });
     page.setDefaultTimeout(90000);
 
-    console.log('[2/6] 访问首页...');
+    console.log('[2/4] 访问首页...');
     await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 90000 });
     console.log('加载完成, URL:', page.url());
 
-    console.log('[3/6] 等待 Cloudflare 验证...');
+    console.log('[3/4] 等待 Cloudflare 验证...');
     await waitForCF(page);
     console.log('CF 验证已通过');
 
-    // 收集所有IP的token（从首页表格的onclick属性提取）
-    console.log('[4/6] 提取所有IP token...');
+    // 收集所有Multicast IP的token
+    console.log('提取所有Multicast IP token...');
     const allTokens = await page.evaluate(() => {
       const tables = document.querySelectorAll('table');
       if (tables.length < 2) return [];
-      // 第二个表格是Multicast
+      // 第二个表格是Multicast IP
       const rows = tables[1].querySelectorAll('tbody tr');
       const results = [];
       for (let i = 0; i < rows.length; i++) {
@@ -60,95 +61,34 @@ async function main() {
         if (m) {
           const status = cells.length >= 6 ? cells[5].textContent.trim() : '';
           const channelNum = cells.length >= 2 ? parseInt(cells[1].textContent.trim()) || 0 : 0;
-          results.push({ ip, token: m[1], type: m[2], status, channelNum });
+          const type = cells.length >= 3 ? cells[2].textContent.trim() : '';
+          results.push({ ip, token: m[1], type: m[2], status, channelNum, region: type });
         }
       }
       return results;
     });
-    console.log(`提取到 ${allTokens.length} 个Multicast IP token`);
+    console.log(`提取到 ${allTokens.length} 个Multicast IP`);
 
-    // 按状态和频道数排序：新上线优先，频道数多的优先
+    // 排序：排除暂时失效，新上线优先，频道数多的优先
     allTokens.sort((a, b) => {
-      // 排除暂时失效的
       if (a.status === '暂时失效' && b.status !== '暂时失效') return 1;
       if (a.status !== '暂时失效' && b.status === '暂时失效') return -1;
-      // 新上线优先
       if (a.status === '新上线' && b.status !== '新上线') return -1;
       if (a.status !== '新上线' && b.status === '新上线') return 1;
-      // 频道数多的优先
       return b.channelNum - a.channelNum;
     });
 
-    console.log('排序后前5个:');
-    for (let i = 0; i < Math.min(5, allTokens.length); i++) {
-      console.log(`  #${i+1} ${allTokens[i].ip}: ${allTokens[i].channelNum}个节目, ${allTokens[i].status}`);
-    }
+    // 选择最佳IP（新上线 + 频道数最多）
+    const best = allTokens[0];
+    if (!best || !best.token) throw new Error('未找到有效IP');
 
-    // 逐个验证TXT链接
-    console.log('[5/6] 验证TXT链接...');
-    let bestResult = null;
-    for (let i = 0; i < Math.min(allTokens.length, 10); i++) {
-      const ipInfo = allTokens[i];
-      const txtUrl = `http://iptv.cqshushu.com/index.php?s=${ipInfo.token}&t=multicast&channels=1&format=txt`;
-      console.log(`  #${i+1} ${ipInfo.ip} (${ipInfo.status}, 表格${ipInfo.channelNum}个): 验证TXT...`);
-
-      // 在同一标签页导航到TXT链接（保持cookie）
-      try {
-        await page.goto(txtUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      } catch(e) {
-        console.log('    加载超时，继续...');
-      }
-      await sleep(3000);
-
-      const txtContent = await page.evaluate(() => document.body?.innerText || '');
-      if (!txtContent || txtContent.length < 10) {
-        console.log('    页面为空');
-        // 回首页继续下一个
-        await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await sleep(2000);
-        await waitForCF(page);
-        continue;
-      }
-
-      // 检查节目数量
-      const countMatch = txtContent.match(/#节目数量[：:]\s*(\d+)/);
-      const declaredCount = countMatch ? parseInt(countMatch[1]) : 0;
-      const urlCount = (txtContent.match(/http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+/g) || []).length;
-      const channelCount = Math.max(declaredCount, urlCount);
-      console.log(`    TXT声明: ${declaredCount}, URL数: ${urlCount}`);
-
-      if (channelCount > 0) {
-        bestResult = { txtUrl, ip: ipInfo.ip, channelCount, status: ipInfo.status };
-        console.log(`    ✅ 找到有效IP: ${ipInfo.ip}, ${channelCount} 个频道`);
-        break;
-      } else {
-        console.log('    ❌ 0个频道，跳过');
-      }
-
-      // 回首页继续下一个
-      await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await sleep(2000);
-      await waitForCF(page);
-    }
-
-    if (!bestResult) {
-      // 如果所有IP都没有频道，使用表格中频道数最多的IP
-      const fallback = allTokens.find(ip => ip.channelNum > 0 && ip.status !== '暂时失效');
-      if (fallback) {
-        const txtUrl = `http://iptv.cqshushu.com/index.php?s=${fallback.token}&t=multicast&channels=1&format=txt`;
-        bestResult = { txtUrl, ip: fallback.ip, channelCount: 0, status: fallback.status };
-        console.log('警告: 所有TXT验证为0频道，使用表格最多的:', fallback.ip, fallback.channelNum);
-      } else {
-        throw new Error('所有IP均无有效频道');
-      }
-    }
-
-    console.log('最终TXT链接:', bestResult.txtUrl);
-    console.log(`  IP: ${bestResult.ip}, 频道数: ${bestResult.channelCount}`);
+    const txtUrl = `http://iptv.cqshushu.com/index.php?s=${best.token}&t=multicast&channels=1&format=txt`;
+    console.log(`选中: ${best.ip} (${best.region}, ${best.status}, ${best.channelNum}个节目)`);
+    console.log(`TXT链接: ${txtUrl}`);
 
     // 保存KV
-    console.log('[6/6] 保存KV...');
-    await saveKV(bestResult.txtUrl, bestResult.ip, bestResult.channelCount);
+    console.log('[4/4] 保存KV...');
+    await saveKV(txtUrl, best.ip, best.channelNum, best.region, best.status);
     console.log('=== 成功 ===');
 
   } catch (error) {
@@ -182,7 +122,7 @@ async function waitForCF(page) {
   throw new Error('CF验证超时: ' + info.t.substring(0,100));
 }
 
-async function saveKV(txtUrl, ip, channelCount) {
+async function saveKV(txtUrl, ip, channelNum, region, status) {
   const ts = new Date().toISOString();
   const h = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
   const base = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/`;
@@ -190,7 +130,9 @@ async function saveKV(txtUrl, ip, channelCount) {
     ['txt_link', txtUrl],
     ['current_ip', ip],
     ['last_update', ts],
-    ['channel_count', String(channelCount)],
+    ['channel_count', String(channelNum)],
+    ['region', region || ''],
+    ['ip_status', status || ''],
     ['last_error', '']
   ];
   for (const [k,v] of entries) {

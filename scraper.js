@@ -207,21 +207,42 @@ async function gotoDetail(page, browser, ipInfo) {
 }
 
 async function findM3U(dp) {
+  // 先在详情页查找 M3U 链接
+  console.log('在详情页查找M3U...');
+  const detailContent = await dp.evaluate(() => document.body?.innerText?.substring(0, 1500) || '');
+  console.log('详情页内容:', detailContent);
+  
+  // 查找详情页的所有链接
+  const detailLinks = await dp.evaluate(() => {
+    return Array.from(document.querySelectorAll('a, button')).map(el => ({
+      type: el.tagName,
+      text: el.textContent.trim().substring(0, 60),
+      href: el.href || '',
+      onclick: el.getAttribute('onclick') || ''
+    }));
+  });
+  console.log('详情页元素:', JSON.stringify(detailLinks, null, 2));
+  
+  // 先在详情页找 M3U
   let url = await dp.evaluate(() => {
     for (const l of document.querySelectorAll('a')) {
-      if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {
+      if (l.textContent.includes('M3U') || l.textContent.includes('m3u') || l.textContent.includes('播放列表')) {
         let h = l.href; if (h && !h.startsWith('http')) h = new URL(h, window.location.origin).href;
         return h;
       }
     }
     return null;
   });
-  if (url) return url;
+  if (url) { console.log('详情页找到M3U:', url); return url; }
 
+  // 查找频道列表链接
   const chUrl = await dp.evaluate(() => {
-    for (const l of document.querySelectorAll('a')) { if (l.textContent.includes('查看频道列表') || l.textContent.includes('频道列表')) return l.href; }
+    for (const l of document.querySelectorAll('a')) { 
+      if (l.textContent.includes('查看频道列表') || l.textContent.includes('频道列表')) return l.href; 
+    }
     return null;
   });
+  
   if (chUrl) {
     console.log('进频道列表:', chUrl);
     await dp.goto(chUrl, { waitUntil: 'networkidle2', timeout: 30000 });

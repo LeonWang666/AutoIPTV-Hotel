@@ -84,7 +84,7 @@ async function main() {
       const ipInfo = allTokens[i];
       if (!ipInfo.token) continue;
 
-      const txtUrl = `http://iptv.cqshushu.com/index.php?s=${ipInfo.token}&t=multicast&channels=1&format=txt`;
+      const txtUrl = `https://iptv.cqshushu.com/index.php?s=${ipInfo.token}&t=multicast&channels=1&format=txt`;
       console.log(`  #${i+1} ${ipInfo.ip} (${ipInfo.status}, 表格${ipInfo.channelNum}个): 访问TXT...`);
 
       // 在同一page中导航到TXT链接（保持CF cookie）
@@ -138,7 +138,7 @@ async function main() {
       // 所有IP都返回0频道，使用频道数最多的IP的TXT链接（用户本地网络可能能访问）
       const fallback = allTokens.find(ip => ip.status !== '暂时失效' && ip.channelNum > 0);
       if (fallback) {
-        const txtUrl = `http://iptv.cqshushu.com/index.php?s=${fallback.token}&t=multicast&channels=1&format=txt`;
+        const txtUrl = `https://iptv.cqshushu.com/index.php?s=${fallback.token}&t=multicast&channels=1&format=txt`;
         bestResult = {
           txtUrl,
           ip: fallback.ip,

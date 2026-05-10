@@ -23,6 +23,7 @@ async function main() {
     console.log('[1/7] 启动浏览器...');
     browser = await puppeteer.launch({
       headless: 'new',
+      protocolTimeout: 180000,
       args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--disable-blink-features=AutomationControlled','--window-size=1920,1080']
     });
 
@@ -233,36 +234,37 @@ async function findM3U(dp, browser) {
   // 用 Puppeteer 点击（保持 session）
   console.log('点击"查看频道列表"按钮...');
   const pagesBeforeClick = (await browser.pages()).length;
-  await channelBtn.click();
+  
+  // 设置较短的导航超时，避免卡死
+  await Promise.race([
+    channelBtn.click(),
+    sleep(10000)
+  ]).catch(e => console.log('点击警告:', e.message));
   
   // 等待页面跳转或新标签页
   console.log('等待频道列表页加载...');
-  await sleep(5000);
   
-  // 检查是否打开了新标签页
+  // 轮询检查新标签页或页面跳转
   let channelPage = null;
-  const allPages = await browser.pages();
-  console.log(`当前 ${allPages.length} 个标签页（点击前 ${pagesBeforeClick}）`);
-  
-  for (const p of allPages) {
-    const u = p.url();
-    if (u !== 'about:blank' && !u.includes('eatcells') && !u.includes('faithfuloccasion')) {
-      console.log(`  标签: ${u.substring(0, 120)}`);
+  for (let w = 0; w < 10; w++) {
+    await sleep(3000);
+    const allPages = await browser.pages();
+    
+    for (const p of allPages) {
+      const u = p.url();
+      // 查找频道列表页（URL 包含 s= 参数且不是详情页）
+      if (u.includes('s=') && u.includes('t=multicast') && !u.includes('p=')) {
+        channelPage = p;
+        break;
+      }
     }
-    // 查找频道列表页（URL 包含 s= 参数）
-    if (u.includes('s=') && u.includes('t=multicast') && p !== dp) {
-      channelPage = p;
-    }
-  }
-  
-  // 如果没有新标签页，检查当前页是否已跳转
-  if (!channelPage) {
+    if (channelPage) break;
+    
+    // 检查详情页是否已跳转到频道列表页
     const dpUrl = dp.url();
-    if (dpUrl.includes('s=') && dpUrl.includes('t=multicast')) {
+    if (dpUrl.includes('s=') && !dpUrl.includes('p=')) {
       channelPage = dp;
-    } else {
-      // 可能当前页就是频道列表页（URL 变了）
-      channelPage = dp;
+      break;
     }
   }
   

@@ -148,53 +148,61 @@ async function findIP(page) {
 }
 
 async function gotoDetail(page, browser, ipInfo) {
-  if (ipInfo.nav === 'gotoIP' && ipInfo.token) {
-    await page.evaluate((t, ty) => { if (typeof gotoIP === 'function') gotoIP(t, ty); }, ipInfo.token, ipInfo.type);
-    // 等待新标签页打开
-    console.log('等待新标签页...');
-    for (let w = 0; w < 5; w++) {
-      await sleep(3000);
-      const pages = await browser.pages();
-      console.log(`  ${w+1}/5: ${pages.length} 个标签页`);
-      for (const p of pages) {
-        const u = p.url();
-        console.log(`    ${u.substring(0, 100)}`);
-      }
-      // 查找非广告、非首页的标签页
-      for (const p of pages) {
-        const u = p.url();
-        if (u.includes('iptv.cqshushu.com') && !u.includes('eatcells') && !u.includes('faithfuloccasion') && u !== 'about:blank' && p !== page) {
-          // 关闭广告页
-          for (const ad of pages) { if (ad.url().includes('eatcells') || ad.url().includes('faithfuloccasion')) { try { await ad.close(); } catch(e){} } }
-          return p;
-        }
-      }
+  // 策略：直接用 Puppeteer 点击链接（而不是 evaluate 调用 gotoIP）
+  // 这样浏览器会认为是真实用户点击，允许打开新标签页
+  console.log('模拟点击IP链接...');
+  
+  const linkSelector = 'table:nth-child(2) a.ip-link, table:nth-of-type(2) a.ip-link';
+  
+  // 找到目标链接并点击
+  const clicked = await page.evaluateHandle((ip) => {
+    const tables = document.querySelectorAll('table');
+    if (tables.length < 2) return null;
+    const links = tables[1].querySelectorAll('a');
+    for (const l of links) {
+      if (l.textContent.trim() === ip) return l;
     }
-  } else if (ipInfo.nav === 'href' && ipInfo.href) {
-    console.log('导航到:', ipInfo.href);
-    await page.goto(ipInfo.href, { waitUntil: 'networkidle2', timeout: 30000 });
-    await sleep(3000);
-    const txt = await page.evaluate(() => document.body?.innerText?.substring(0,100) || '');
-    if (txt.includes('请稍候') || txt.includes('验证')) await waitForCF(page);
-    return page;
+    return null;
+  }, ipInfo.ip);
+  
+  if (clicked) {
+    // 使用 Puppeteer 的 click 方法（模拟真实点击）
+    await clicked.click();
+    console.log('已点击链接');
   } else {
-    await page.evaluate((ip) => {
-      const tables = document.querySelectorAll('table');
-      if (tables.length < 2) return;
-      for (const l of tables[1].querySelectorAll('a')) { if (l.textContent.trim() === ip) { l.click(); return; } }
-    }, ipInfo.ip);
-    await sleep(8000);
+    // fallback: 用 evaluate 调用 gotoIP
+    console.log('链接未找到，使用 gotoIP...');
+    await page.evaluate((t, ty) => { if (typeof gotoIP === 'function') gotoIP(t, ty); }, ipInfo.token, ipInfo.type);
   }
 
-  const pages = await browser.pages();
-  for (const p of pages) {
-    const u = p.url();
-    if (u.includes('iptv.cqshushu.com') && !u.includes('eatcells') && !u.includes('faithfuloccasion') && u !== 'about:blank' && p !== page) {
-      for (const ad of pages) { if (ad.url().includes('eatcells') || ad.url().includes('faithfuloccasion')) { try { await ad.close(); } catch(e){} } }
-      return p;
+  // 等待新标签页打开
+  console.log('等待新标签页...');
+  for (let w = 0; w < 8; w++) {
+    await sleep(3000);
+    const pages = await browser.pages();
+    console.log(`  ${w+1}/8: ${pages.length} 个标签页`);
+    for (const p of pages) {
+      const u = p.url();
+      if (u !== 'about:blank') console.log(`    ${u.substring(0, 120)}`);
+    }
+    // 查找详情页（非首页、非广告）
+    for (const p of pages) {
+      const u = p.url();
+      if (u.includes('iptv.cqshushu.com') && 
+          !u.includes('eatcells') && !u.includes('faithfuloccasion') && 
+          u !== 'about:blank' && 
+          !u.includes('index.php') &&  // 排除首页
+          p !== page) {
+        for (const ad of pages) { if (ad.url().includes('eatcells') || ad.url().includes('faithfuloccasion')) { try { await ad.close(); } catch(e){} } }
+        return p;
+      }
+    }
+    // 也检查当前页是否已跳转
+    const curUrl = page.url();
+    if (!curUrl.includes('index.php') && curUrl.includes('iptv.cqshushu.com')) {
+      return page;
     }
   }
-  if (page.url().includes('p=') || page.url().includes('detail')) return page;
   return null;
 }
 

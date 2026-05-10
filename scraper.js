@@ -115,40 +115,78 @@ async function main() {
         const detailUrl = `https://iptv.cqshushu.com/index.php?p=${ip.token}&t=${ip.type}`;
         console.log(`  详情页URL: ${detailUrl}`);
 
-        await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await sleep(2000); // 等待详情页加载
+        await page.goto(detailUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await sleep(3000); // 等待详情页JS渲染
+
+        // 调试：输出详情页信息
+        const debugInfo = await page.evaluate(() => ({
+          url: window.location.href,
+          title: document.title,
+          linkCount: document.querySelectorAll('a').length,
+          bodyPreview: document.body?.innerText?.substring(0, 200) || '',
+          allOnclicks: Array.from(document.querySelectorAll('a[onclick]')).map(a => a.textContent.trim() + ' => ' + a.getAttribute('onclick').substring(0, 80)).slice(0, 10)
+        }));
+        console.log(`  详情页调试: URL=${debugInfo.url}`);
+        console.log(`  标题: ${debugInfo.title}`);
+        console.log(`  链接数: ${debugInfo.linkCount}`);
+        console.log(`  内容预览: ${debugInfo.bodyPreview.substring(0, 100)}`);
+        if (debugInfo.allOnclicks.length > 0) {
+          console.log(`  onclick链接: ${debugInfo.allOnclicks.join(' | ')}`);
+        }
+
+        // 等待详情页内容加载（等待"查看频道列表"或"TXT"出现）
+        try {
+          await page.waitForFunction(() => {
+            const body = document.body?.innerText || '';
+            return body.includes('TXT') || body.includes('频道列表') || body.includes('下载');
+          }, { timeout: 10000 });
+        } catch (e) {
+          console.log('  等待详情页内容超时');
+        }
 
         // 从详情页提取TXT接口的token
         const txtInfo = await page.evaluate(() => {
           const links = document.querySelectorAll('a');
+          const results = [];
           for (const a of links) {
             const onclick = a.getAttribute('onclick') || '';
             const text = a.textContent.trim();
+            const href = a.getAttribute('href') || '';
+            results.push({ text: text.substring(0, 30), onclick: onclick.substring(0, 100), href: href.substring(0, 100) });
             // 查找"🔗 TXT接口"链接
             if (text.includes('TXT接口') && onclick.includes('copyToClipboard')) {
               const m = onclick.match(/copyToClipboard\(['"]([^'"]+)['"]\)/);
               if (m) {
-                return { txtUrl: m[1] };
+                return { txtUrl: m[1], found: true };
               }
             }
             // 也查找TXT下载链接
-            if (text.includes('TXT') && (a.getAttribute('href') || '').includes('format=txt')) {
-              const href = a.getAttribute('href') || '';
-              return { txtUrl: 'https://iptv.cqshushu.com/index.php' + href };
+            if (text.includes('TXT') && href.includes('format=txt')) {
+              return { txtUrl: 'https://iptv.cqshushu.com/index.php' + href, found: true };
+            }
+            // 也查找TXT下载链接（download=txt）
+            if (text.includes('TXT') && href.includes('download=txt')) {
+              return { txtUrl: 'https://iptv.cqshushu.com/index.php' + href.replace('download=txt', 'format=txt'), found: true };
             }
           }
           // 备选：查找所有包含s=参数的链接
           for (const a of links) {
             const href = a.getAttribute('href') || '';
             if (href.includes('s=') && (href.includes('format=txt') || href.includes('download=txt'))) {
-              return { txtUrl: 'https://iptv.cqshushu.com/index.php' + href };
+              return { txtUrl: 'https://iptv.cqshushu.com/index.php' + href.replace('download=txt', 'format=txt'), found: true };
             }
           }
-          return null;
+          return { found: false, allLinks: results.slice(0, 15) };
         });
 
-        if (!txtInfo) {
+        if (!txtInfo || !txtInfo.found) {
           console.log('  ❌ 未找到TXT接口链接');
+          if (txtInfo && txtInfo.allLinks) {
+            console.log(`  页面链接列表:`);
+            for (const link of txtInfo.allLinks) {
+              console.log(`    [${link.text}] onclick=${link.onclick} href=${link.href}`);
+            }
+          }
           continue;
         }
 

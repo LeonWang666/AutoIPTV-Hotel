@@ -233,45 +233,66 @@ async function findM3U(dp, browser) {
   
   // 用 Puppeteer 点击（保持 session）
   console.log('点击"查看频道列表"按钮...');
-  const pagesBeforeClick = (await browser.pages()).length;
   
-  // 设置较短的导航超时，避免卡死
-  await Promise.race([
-    channelBtn.click(),
-    sleep(10000)
-  ]).catch(e => console.log('点击警告:', e.message));
+  // 先获取按钮的 href
+  const channelHref = await channelBtn.evaluate(el => el.href);
+  console.log('频道列表按钮 href:', channelHref);
   
-  // 等待页面跳转或新标签页
-  console.log('等待频道列表页加载...');
+  // 方法1: 直接用 Puppeteer 点击
+  try {
+    await Promise.race([
+      channelBtn.click(),
+      sleep(15000)
+    ]);
+  } catch(e) {
+    console.log('点击警告:', e.message);
+  }
   
-  // 轮询检查新标签页或页面跳转
+  await sleep(5000);
+  
+  // 检查是否跳转成功
   let channelPage = null;
-  for (let w = 0; w < 10; w++) {
-    await sleep(3000);
+  const dpUrl = dp.url();
+  console.log('点击后详情页URL:', dpUrl);
+  
+  if (dpUrl.includes('s=') && !dpUrl.includes('p=')) {
+    // 详情页已跳转到频道列表页
+    channelPage = dp;
+    console.log('详情页已跳转到频道列表页');
+  } else {
+    // 点击没生效，尝试用 JS 导航
+    console.log('点击未跳转，尝试JS导航...');
+    if (channelHref) {
+      await dp.evaluate((href) => { window.location.href = href; }, channelHref);
+      await sleep(8000);
+      
+      const newDpUrl = dp.url();
+      console.log('JS导航后URL:', newDpUrl);
+      
+      if (newDpUrl.includes('s=')) {
+        channelPage = dp;
+      }
+    }
+  }
+  
+  // 如果还是没跳转，检查是否有新标签页
+  if (!channelPage) {
     const pages = await browser.pages();
-    
     for (const p of pages) {
       const u = p.url();
-      // 查找频道列表页（URL 包含 s= 参数且不是详情页）
-      if (u.includes('s=') && u.includes('t=multicast') && !u.includes('p=')) {
+      if (u.includes('s=') && u.includes('t=multicast') && !u.includes('p=') && p !== dp) {
         channelPage = p;
         break;
       }
     }
-    if (channelPage) break;
-    
-    // 检查详情页是否已跳转到频道列表页
-    const dpUrl = dp.url();
-    if (dpUrl.includes('s=') && !dpUrl.includes('p=')) {
-      channelPage = dp;
-      break;
-    }
   }
   
   if (!channelPage) {
-    // 最后尝试：使用当前详情页
-    console.log('未找到独立频道列表页，使用详情页');
-    channelPage = dp;
+    console.log('所有方法都未能进入频道列表页');
+    // 打印详情页内容用于调试
+    const detailText = await dp.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+    console.log('当前页面内容:', detailText);
+    return null;
   }
   
   // 关闭广告页
@@ -315,33 +336,50 @@ async function findM3U(dp, browser) {
   }
   
   // 如果 M3U 链接是 javascript:void(0)，需要点击它
-  const m3uBtn = await channelPage.evaluateHandle(() => {
-    const links = document.querySelectorAll('a');
-    for (const l of links) {
-      if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) return l;
-    }
-    // 也检查按钮
-    const btns = document.querySelectorAll('button');
-    for (const b of btns) {
-      if (b.textContent.includes('M3U') || b.textContent.includes('m3u')) return b;
-    }
-    return null;
-  });
-  
-  if (m3uBtn) {
-    console.log('找到M3U按钮，点击...');
-    // 监听新标签页或弹窗
-    const newPagePromise = new Promise((resolve) => {
-      browser.once('targetcreated', async (target) => {
-        if (target.type() === 'page') {
-          const np = await target.page();
-          await sleep(2000);
-          resolve(np);
-        }
-      });
+  let m3uBtnHandle = null;
+  try {
+    m3uBtnHandle = await channelPage.evaluateHandle(() => {
+      const links = document.querySelectorAll('a');
+      for (const l of links) {
+        if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) return l;
+      }
+      const btns = document.querySelectorAll('button');
+      for (const b of btns) {
+        if (b.textContent.includes('M3U') || b.textContent.includes('m3u')) return b;
+      }
+      return null;
     });
+  } catch(e) {
+    console.log('查找M3U按钮异常:', e.message);
+  }
+  
+  if (m3uBtnHandle) {
+    console.log('找到M3U按钮，点击...');
     
-    await m3uBtn.click();
+    // 获取 M3U 按钮的文本和属性
+    const m3uBtnInfo = await m3uBtnHandle.evaluate(el => ({
+      text: el.textContent.trim(),
+      href: el.href || '',
+      tag: el.tagName,
+      onclick: el.getAttribute('onclick') || ''
+    }));
+    console.log('M3U按钮信息:', JSON.stringify(m3uBtnInfo));
+    
+    // 如果有真实 href，直接返回
+    if (m3uBtnInfo.href && !m3uBtnInfo.href.startsWith('javascript')) {
+      console.log('M3U按钮有真实href:', m3uBtnInfo.href);
+      return m3uBtnInfo.href;
+    }
+    
+    // 点击按钮
+    try {
+      await Promise.race([
+        m3uBtnHandle.click(),
+        sleep(5000)
+      ]);
+    } catch(e) {
+      console.log('点击M3U按钮异常:', e.message);
+    }
     await sleep(3000);
     
     // 检查是否打开了新页面

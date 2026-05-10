@@ -1,10 +1,13 @@
 /**
- * IPTV M3U 自动抓取脚本 v2
+ * IPTV M3U 自动抓取脚本 v3
  * 在 GitHub Actions 中通过 Puppeteer 运行
+ * 使用 puppeteer-extra + stealth 绕过 Cloudflare 检测
  * 抓取结果通过 Cloudflare API 写入 KV 存储
  */
 
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 
 // Cloudflare 配置
 const CF_ACCOUNT_ID = '13992e7b764637d462d3cf98f3a20086';
@@ -36,114 +39,33 @@ async function main() {
     });
 
     const page = await browser.newPage();
-
-    // 隐藏自动化特征
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      // 覆盖 plugins
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5]
-      });
-      // 覆盖 languages
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['zh-CN', 'zh', 'en']
-      });
-    });
-
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1920, height: 1080 });
-
-    // 设置超时
-    page.setDefaultTimeout(60000);
-    page.setDefaultNavigationTimeout(60000);
+    page.setDefaultTimeout(90000);
+    page.setDefaultNavigationTimeout(90000);
 
     // 步骤1: 访问首页
     console.log('[2/7] 访问首页...');
-    const response = await page.goto('https://iptv.cqshushu.com/index.php', {
+    await page.goto('https://iptv.cqshushu.com/index.php', {
       waitUntil: 'networkidle2',
-      timeout: 60000
+      timeout: 90000
     });
-    console.log('响应状态:', response ? response.status() : 'null');
-    console.log('当前URL:', page.url());
+    console.log('初始加载完成, URL:', page.url());
 
-    // 步骤2: 处理 JS 验证 + 等待页面加载
-    console.log('[3/7] 等待页面加载和JS验证...');
+    // 步骤2: 等待 Cloudflare Challenge 通过
+    console.log('[3/7] 等待 Cloudflare 验证通过...');
+    await waitForCloudflarePass(page);
+    console.log('Cloudflare 验证已通过');
 
-    // 先等待页面有基本内容
-    try {
-      await page.waitForSelector('body', { timeout: 10000 });
-      console.log('body 已加载');
-    } catch(e) {
-      console.log('body 选择器超时，继续...');
-    }
-
-    // 模拟鼠标移动（反爬检测）
-    await simulateHuman(page);
-
-    // 等待 JS 验证完成并设置 cookie
-    // 网站会通过 JS 设置 list_js_verified cookie
-    console.log('等待 JS 验证...');
-    await sleep(5000);
-
-    // 检查 cookie 是否已设置
-    const cookies = await page.cookies();
-    const verifiedCookie = cookies.find(c => c.name === 'list_js_verified');
-    console.log('list_js_verified cookie:', verifiedCookie ? '已设置' : '未设置');
-
-    // 手动设置 cookie 以确保通过验证
-    if (!verifiedCookie) {
-      console.log('手动设置验证 cookie...');
-      await page.setCookie({
-        name: 'list_js_verified',
-        value: '1',
-        domain: 'iptv.cqshushu.com',
-        path: '/'
-      });
-    }
-
-    // 等待表格出现（带重试）
-    console.log('等待表格加载...');
-    let tablesLoaded = false;
-    for (let retry = 0; retry < 3; retry++) {
-      const tableCount = await page.evaluate(() => document.querySelectorAll('table').length);
-      console.log(`  重试 ${retry + 1}/3: 当前 table 数量 = ${tableCount}`);
-      if (tableCount >= 2) {
-        tablesLoaded = true;
-        break;
-      }
-      // 可能需要刷新
-      if (retry < 2) {
-        console.log('  重新加载页面...');
-        await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
-        await sleep(5000);
-        await simulateHuman(page);
-      }
-    }
-
-    if (!tablesLoaded) {
-      // 截图调试
-      const screenshot = await page.screenshot({ encoding: 'base64' });
-      console.log('页面截图(base64前100字符):', screenshot.substring(0, 100));
-      const pageContent = await page.evaluate(() => document.body.innerText.substring(0, 500));
-      console.log('页面内容:', pageContent);
-      throw new Error('页面加载失败：未找到足够的表格元素');
-    }
-
-    console.log('页面加载成功');
-
-    // 步骤3: 查找新上线的 Multicast IP（可能需要翻页）
+    // 步骤3: 查找新上线的 Multicast IP
     console.log('[4/7] 查找新上线Multicast IP...');
-    let ipInfo = null;
+    let ipInfo = await findNewOnlineIP(page);
 
-    // 先检查当前页
-    ipInfo = await findNewOnlineIP(page);
-
-    // 如果当前页没找到，翻页查找（最多查3页）
+    // 如果当前页没找到，翻页查找
     if (!ipInfo) {
       console.log('当前页未找到新上线IP，尝试翻页...');
       for (let pageNum = 2; pageNum <= 5; pageNum++) {
         console.log(`  检查第 ${pageNum} 页...`);
-        // 点击下一页
         const clicked = await page.evaluate((pn) => {
           const links = document.querySelectorAll('a');
           for (const link of links) {
@@ -152,7 +74,6 @@ async function main() {
               return true;
             }
           }
-          // 尝试"下一页"按钮
           for (const link of links) {
             if (link.textContent.includes('下一页')) {
               link.click();
@@ -174,9 +95,9 @@ async function main() {
       }
     }
 
+    // 如果还是没找到，使用第一个可用 IP
     if (!ipInfo || !ipInfo.token) {
-      // 如果还是没找到，尝试直接用第一页的第一个 IP（即使不是新上线）
-      console.log('未找到新上线IP，尝试使用第一个可用IP...');
+      console.log('未找到新上线IP，使用第一个可用IP...');
       ipInfo = await page.evaluate(() => {
         const tables = document.querySelectorAll('table');
         let mTable = tables.length >= 2 ? tables[1] : null;
@@ -196,9 +117,7 @@ async function main() {
           status: cells[5].textContent.trim()
         };
       });
-      if (ipInfo) {
-        console.log(`使用IP: ${ipInfo.ip} (状态: ${ipInfo.status})`);
-      }
+      if (ipInfo) console.log(`使用IP: ${ipInfo.ip} (状态: ${ipInfo.status})`);
     }
 
     if (!ipInfo || !ipInfo.token) {
@@ -208,26 +127,23 @@ async function main() {
 
     // 步骤4: 点击IP进入详情页
     console.log('[5/7] 进入详情页...');
-    const allPagesBefore = (await browser.pages()).length;
+    const pagesBefore = (await browser.pages()).length;
 
     await page.evaluate((token, type) => {
       if (typeof gotoIP === 'function') gotoIP(token, type);
     }, ipInfo.token, ipInfo.type);
 
-    // 等待新页面打开
     console.log('等待新页面...');
     await sleep(8000);
 
     // 查找详情页
     let detailPage = null;
     const allPages = await browser.pages();
-    console.log(`当前共有 ${allPages.length} 个标签页（之前 ${allPagesBefore} 个）`);
+    console.log(`标签页数量: ${allPages.length}（之前 ${pagesBefore}）`);
 
     for (const p of allPages) {
       const url = p.url();
-      console.log(`  标签页: ${url.substring(0, 80)}`);
       if (url.includes('iptv.cqshushu.com') &&
-          (url.includes('p=') || url.includes('index.php')) &&
           !url.includes('eatcells') &&
           !url.includes('faithfuloccasion') &&
           url !== 'about:blank' &&
@@ -236,27 +152,13 @@ async function main() {
       }
     }
 
-    // 如果没找到新标签页，检查当前页是否已跳转
-    if (!detailPage) {
-      const currentUrl = page.url();
-      if (currentUrl.includes('p=') || currentUrl.includes('detail')) {
-        detailPage = page;
-        console.log('当前页已跳转到详情页');
-      }
+    if (!detailPage && (page.url().includes('p=') || page.url().includes('detail'))) {
+      detailPage = page;
     }
 
-    if (!detailPage) {
-      // 截图调试
-      for (const p of allPages) {
-        if (p.url() !== 'about:blank') {
-          const content = await p.evaluate(() => document.body?.innerText?.substring(0, 300) || 'empty');
-          console.log(`  页面内容: ${content}`);
-        }
-      }
-      throw new Error('未找到详情页');
-    }
+    if (!detailPage) throw new Error('未找到详情页');
 
-    // 关闭广告页面
+    // 关闭广告页
     for (const p of allPages) {
       const url = p.url();
       if (url.includes('eatcells') || url.includes('faithfuloccasion')) {
@@ -269,14 +171,10 @@ async function main() {
 
     // 步骤5: 查找M3U链接
     console.log('[6/7] 查找M3U链接...');
-    let m3uUrl = null;
-
-    // 先在详情页查找 M3U 链接
-    m3uUrl = await detailPage.evaluate(() => {
+    let m3uUrl = await detailPage.evaluate(() => {
       const links = document.querySelectorAll('a');
       for (const link of links) {
-        const text = link.textContent;
-        if (text.includes('M3U') || text.includes('m3u')) {
+        if (link.textContent.includes('M3U') || link.textContent.includes('m3u')) {
           let href = link.href;
           if (href && !href.startsWith('http')) href = new URL(href, window.location.origin).href;
           return href;
@@ -285,10 +183,7 @@ async function main() {
       return null;
     });
 
-    if (m3uUrl) {
-      console.log('详情页直接找到M3U链接:', m3uUrl);
-    } else {
-      // 查找"查看频道列表"链接
+    if (!m3uUrl) {
       const channelLink = await detailPage.evaluate(() => {
         const links = document.querySelectorAll('a');
         for (const link of links) {
@@ -300,15 +195,13 @@ async function main() {
       });
 
       if (channelLink) {
-        console.log('找到频道列表链接，跳转...');
+        console.log('进入频道列表页...');
         await detailPage.goto(channelLink, { waitUntil: 'networkidle2', timeout: 30000 });
         await sleep(3000);
-
         m3uUrl = await detailPage.evaluate(() => {
           const links = document.querySelectorAll('a');
           for (const link of links) {
-            const text = link.textContent;
-            if (text.includes('M3U') || text.includes('m3u')) {
+            if (link.textContent.includes('M3U') || link.textContent.includes('m3u')) {
               let href = link.href;
               if (href && !href.startsWith('http')) href = new URL(href, window.location.origin).href;
               return href;
@@ -319,60 +212,78 @@ async function main() {
       }
     }
 
-    if (!m3uUrl) {
-      // 最后尝试：直接构造 M3U URL
-      const detailUrl = detailPage.url();
-      console.log('尝试从详情页URL构造M3U链接...');
-      m3uUrl = await detailPage.evaluate(() => {
-        // 查找所有链接，看看有没有 m3u 相关的
-        const links = Array.from(document.querySelectorAll('a'));
-        const allHrefs = links.map(l => l.href).filter(h => h && h.startsWith('http'));
-        return allHrefs.join(' | ');
-      });
-      console.log('页面所有链接:', m3uUrl);
-      throw new Error('未找到M3U链接');
-    }
+    if (!m3uUrl) throw new Error('未找到M3U链接');
+    console.log('M3U链接:', m3uUrl);
 
-    console.log('找到M3U链接:', m3uUrl);
-
-    // 步骤7: 保存到 Cloudflare KV
+    // 步骤7: 保存到 KV
     console.log('[7/7] 保存到 Cloudflare KV...');
     await saveToCloudflare(m3uUrl, ipInfo.ip);
-
     console.log('=== 抓取成功 ===');
 
   } catch (error) {
     console.error('抓取失败:', error.message);
-
-    // 保存错误信息到 Cloudflare
     try {
       await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/last_error`, {
         method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${CF_API_TOKEN}`,
-          'Content-Type': 'text/plain'
-        },
+        headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' },
         body: new Date().toISOString() + ': ' + error.message
       });
-    } catch(e) {
-      console.error('保存错误信息失败:', e.message);
-    }
-
+    } catch(e) {}
     process.exit(1);
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
   }
 }
 
-// 在 Multicast 表格中查找新上线的 IP
+// 等待 Cloudflare Challenge 通过
+async function waitForCloudflarePass(page) {
+  for (let i = 0; i < 30; i++) {
+    const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 200) || '');
+    const tableCount = await page.evaluate(() => document.querySelectorAll('table').length);
+
+    console.log(`  等待中... (${i+1}/30) tables=${tableCount} text="${bodyText.substring(0, 50)}"`);
+
+    // 检查是否通过了 Cloudflare 验证
+    if (tableCount >= 2) return true;
+
+    // 检查是否在 Cloudflare challenge 页面
+    if (bodyText.includes('请稍候') || bodyText.includes('Just a moment') || bodyText.includes('Checking')) {
+      console.log('  检测到 Cloudflare 验证页面，等待...');
+      await sleep(3000);
+      await simulateHuman(page);
+      continue;
+    }
+
+    // 检查是否有 Turnstile/Challenge 需要点击
+    try {
+      const challengeFrame = await page.$('iframe[src*="challenges"]');
+      if (challengeFrame) {
+        console.log('  检测到 Challenge iframe，尝试点击...');
+        const frame = await challengeFrame.contentFrame();
+        if (frame) {
+          const checkbox = await frame.$('input[type="checkbox"]');
+          if (checkbox) await checkbox.click();
+        }
+      }
+    } catch(e) {}
+
+    await sleep(2000);
+  }
+
+  // 最后一次检查
+  const tableCount = await page.evaluate(() => document.querySelectorAll('table').length);
+  if (tableCount >= 2) return true;
+
+  const pageContent = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+  console.log('最终页面内容:', pageContent);
+  throw new Error('Cloudflare 验证超时，页面内容: ' + pageContent.substring(0, 100));
+}
+
 async function findNewOnlineIP(page) {
   return await page.evaluate(() => {
     const tables = document.querySelectorAll('table');
     let mTable = tables.length >= 2 ? tables[1] : null;
     if (!mTable) return null;
-
     const rows = mTable.querySelectorAll('tbody tr');
     for (const row of rows) {
       const cells = row.querySelectorAll('td');
@@ -392,67 +303,31 @@ async function findNewOnlineIP(page) {
   });
 }
 
-// 模拟人类行为
 async function simulateHuman(page) {
   try {
-    const width = 1920, height = 1080;
     for (let i = 0; i < 5; i++) {
-      await page.mouse.move(
-        Math.random() * width,
-        Math.random() * height
-      );
+      await page.mouse.move(Math.random() * 1920, Math.random() * 1080);
       await sleep(200 + Math.random() * 300);
     }
-    // 随机滚动
-    await page.evaluate(() => {
-      window.scrollBy(0, Math.random() * 300);
-    });
+    await page.evaluate(() => window.scrollBy(0, Math.random() * 300));
     await sleep(500);
   } catch(e) {}
 }
 
 async function saveToCloudflare(m3uLink, ip) {
   const timestamp = new Date().toISOString();
+  const headers = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
 
-  console.log('保存到 Cloudflare KV...');
+  const r1 = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/m3u_link`, { method: 'PUT', headers, body: m3uLink });
+  console.log('  m3u_link:', (await r1.json()).success ? 'OK' : 'FAIL');
 
-  // KV API: Content-Type 设为 text/plain，直接发送字符串值
-  const headers = {
-    'Authorization': `Bearer ${CF_API_TOKEN}`,
-    'Content-Type': 'text/plain'
-  };
+  const r2 = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/current_ip`, { method: 'PUT', headers, body: ip });
+  console.log('  current_ip:', (await r2.json()).success ? 'OK' : 'FAIL');
 
-  // 保存 M3U 链接
-  const r1 = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/m3u_link`, {
-    method: 'PUT',
-    headers,
-    body: m3uLink
-  });
-  console.log('  m3u_link:', m3uLink, '->', (await r1.json()).success ? 'OK' : 'FAIL');
+  const r3 = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/last_update`, { method: 'PUT', headers, body: timestamp });
+  console.log('  last_update:', (await r3.json()).success ? 'OK' : 'FAIL');
 
-  // 保存 IP
-  const r2 = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/current_ip`, {
-    method: 'PUT',
-    headers,
-    body: ip
-  });
-  console.log('  current_ip:', ip, '->', (await r2.json()).success ? 'OK' : 'FAIL');
-
-  // 保存更新时间
-  const r3 = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/last_update`, {
-    method: 'PUT',
-    headers,
-    body: timestamp
-  });
-  console.log('  last_update:', timestamp, '->', (await r3.json()).success ? 'OK' : 'FAIL');
-
-  // 清除错误
-  await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/last_error`, {
-    method: 'PUT',
-    headers,
-    body: ''
-  });
-
+  await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/last_error`, { method: 'PUT', headers, body: '' });
   console.log('Cloudflare KV 更新完成');
 }
 

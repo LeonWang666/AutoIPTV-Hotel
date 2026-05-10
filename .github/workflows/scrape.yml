@@ -10,7 +10,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout code
@@ -19,9 +19,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
-      - name: Install Puppeteer
+      - name: Install dependencies
         run: |
           npm install puppeteer
 

@@ -1,8 +1,7 @@
 /**
- * IPTV TXT 接口自动抓取脚本 v10
- * puppeteer-extra + stealth 绕过 Cloudflare
- * 从首页获取token → 在同一浏览器中访问TXT链接 → 抓取完整TXT内容保存到KV
- * Workers直接返回KV中的txt_content，用户APP获取到完整频道列表
+ * IPTV TXT 接口自动抓取脚本 v11
+ * 保存所有有效IP的TXT链接到KV（JSON数组）
+ * Workers随机选一个做302重定向，增加命中有效IP的概率
  */
 
 const puppeteer = require('puppeteer-extra');
@@ -16,12 +15,12 @@ const CF_API_TOKEN = process.env.CF_API_TOKEN;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function main() {
-  console.log('=== IPTV TXT 接口抓取开始 ===');
+  console.log('=== IPTV TXT 接口抓取 v11 ===');
   console.log('时间:', new Date().toISOString());
 
   let browser;
   try {
-    console.log('[1/5] 启动浏览器...');
+    console.log('[1/4] 启动浏览器...');
     browser = await puppeteer.launch({
       headless: 'new',
       protocolTimeout: 180000,
@@ -33,11 +32,11 @@ async function main() {
     await page.setViewport({ width: 1920, height: 1080 });
     page.setDefaultTimeout(90000);
 
-    console.log('[2/5] 访问首页...');
+    console.log('[2/4] 访问首页...');
     await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 90000 });
     console.log('加载完成, URL:', page.url());
 
-    console.log('[3/5] 等待 Cloudflare 验证...');
+    console.log('[3/4] 等待 Cloudflare 验证...');
     await waitForCF(page);
     console.log('CF 验证已通过');
 
@@ -60,106 +59,59 @@ async function main() {
           const status = cells.length >= 6 ? cells[5].textContent.trim() : '';
           const channelNum = cells.length >= 2 ? parseInt(cells[1].textContent.trim()) || 0 : 0;
           const type = cells.length >= 3 ? cells[2].textContent.trim() : '';
-          results.push({ ip, token: m[1], type: m[2], status, channelNum, region: type });
+          results.push({ ip, token: m[1], status, channelNum, region: type });
         }
       }
       return results;
     });
     console.log(`提取到 ${allTokens.length} 个Multicast IP`);
 
-    // 排序：排除暂时失效，新上线优先，频道数多的优先
-    allTokens.sort((a, b) => {
-      if (a.status === '暂时失效' && b.status !== '暂时失效') return 1;
-      if (a.status !== '暂时失效' && b.status === '暂时失效') return -1;
-      if (a.status === '新上线' && b.status !== '新上线') return -1;
-      if (a.status !== '新上线' && b.status === '新上线') return 1;
-      return b.channelNum - a.channelNum;
-    });
+    // 过滤：只要非"暂时失效"的
+    const validIPs = allTokens.filter(ip => ip.status !== '暂时失效' && ip.token);
+    console.log(`有效IP: ${validIPs.length} 个`);
 
-    // 逐个尝试，找到能获取到TXT内容的IP
-    console.log('[4/5] 验证TXT内容...');
-    let bestResult = null;
+    // 构造所有TXT链接
+    const txtLinks = validIPs.map(ip => ({
+      url: `https://iptv.cqshushu.com/index.php?s=${ip.token}&t=multicast&channels=1&format=txt`,
+      ip: ip.ip,
+      channelNum: ip.channelNum,
+      region: ip.region,
+      status: ip.status
+    }));
 
-    for (let i = 0; i < Math.min(allTokens.length, 5); i++) {
-      const ipInfo = allTokens[i];
-      if (!ipInfo.token) continue;
+    // 保存到KV
+    console.log('[4/4] 保存KV...');
+    const ts = new Date().toISOString();
+    const h = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
+    const base = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/`;
 
-      const txtUrl = `https://iptv.cqshushu.com/index.php?s=${ipInfo.token}&t=multicast&channels=1&format=txt`;
-      console.log(`  #${i+1} ${ipInfo.ip} (${ipInfo.status}, 表格${ipInfo.channelNum}个): 访问TXT...`);
+    // 保存所有TXT链接（JSON数组）
+    const linksJson = JSON.stringify(txtLinks);
+    const r1 = await fetch(base + 'txt_links', { method:'PUT', headers:h, body: linksJson });
+    console.log(`  txt_links (${linksJson.length}字节): ${(await r1.json()).success?'OK':'FAIL'}`);
 
-      // 在同一page中导航到TXT链接（保持CF cookie）
-      try {
-        await page.goto(txtUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      } catch(e) {
-        console.log('    加载超时，继续...');
-      }
-      await sleep(3000);
-
-      // 获取页面文本内容
-      const txtContent = await page.evaluate(() => document.body?.innerText || '');
-      console.log(`    内容长度: ${txtContent.length}`);
-
-      // 检查是否有频道数据
-      const urlMatches = txtContent.match(/http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+/g) || [];
-      const countMatch = txtContent.match(/#节目数量[：:]\s*(\d+)/);
-      const declaredCount = countMatch ? parseInt(countMatch[1]) : 0;
-      const actualCount = urlMatches.length;
-      const channelCount = Math.max(declaredCount, actualCount);
-
-      console.log(`    声明: ${declaredCount}, 实际URL: ${actualCount}`);
-
-      if (channelCount > 0) {
-        bestResult = {
-          txtUrl,
-          ip: ipInfo.ip,
-          channelCount,
-          region: ipInfo.region,
-          status: ipInfo.status,
-          txtContent: txtContent  // 保存完整TXT内容
-        };
-        console.log(`    ✅ 找到有效内容: ${channelCount} 个频道`);
-        break;
-      } else {
-        console.log('    ❌ 0频道，跳过');
-      }
-
-      // 回首页尝试下一个
-      try {
-        await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await sleep(2000);
-        await waitForCF(page);
-      } catch(e) {
-        console.log('    回首页失败，停止尝试');
-        break;
-      }
+    // 也保存第一个链接（兼容旧逻辑）
+    const firstLink = txtLinks.length > 0 ? txtLinks[0].url : '';
+    const firstIp = txtLinks.length > 0 ? txtLinks[0].ip : '';
+    const entries = [
+      ['txt_link', firstLink],
+      ['current_ip', firstIp],
+      ['last_update', ts],
+      ['channel_count', String(txtLinks.length > 0 ? txtLinks[0].channelNum : 0)],
+      ['region', txtLinks.length > 0 ? txtLinks[0].region : ''],
+      ['ip_status', txtLinks.length > 0 ? txtLinks[0].status : ''],
+      ['total_ips', String(txtLinks.length)],
+      ['last_error', '']
+    ];
+    for (const [k,v] of entries) {
+      const r = await fetch(base+k, { method:'PUT', headers:h, body:v });
+      console.log(`  ${k}: ${(await r.json()).success?'OK':'FAIL'}`);
     }
 
-    if (!bestResult) {
-      // 所有IP都返回0频道，使用频道数最多的IP的TXT链接（用户本地网络可能能访问）
-      const fallback = allTokens.find(ip => ip.status !== '暂时失效' && ip.channelNum > 0);
-      if (fallback) {
-        const txtUrl = `https://iptv.cqshushu.com/index.php?s=${fallback.token}&t=multicast&channels=1&format=txt`;
-        bestResult = {
-          txtUrl,
-          ip: fallback.ip,
-          channelCount: 0,
-          region: fallback.region,
-          status: fallback.status,
-          txtContent: ''  // 空内容，Workers会做重定向
-        };
-        console.log('警告: 所有IP返回0频道，使用fallback:', fallback.ip);
-      } else {
-        throw new Error('所有IP均无有效频道');
-      }
+    console.log(`=== 成功: ${txtLinks.length} 个IP ===`);
+    for (const link of txtLinks.slice(0, 5)) {
+      console.log(`  ${link.ip}: ${link.channelNum}个, ${link.status}`);
     }
-
-    console.log(`最终: ${bestResult.ip}, ${bestResult.channelCount}频道`);
-    console.log(`TXT内容长度: ${bestResult.txtContent.length}`);
-
-    // 保存KV
-    console.log('[5/5] 保存KV...');
-    await saveKV(bestResult);
-    console.log('=== 成功 ===');
 
   } catch (error) {
     console.error('失败:', error.message);
@@ -190,36 +142,6 @@ async function waitForCF(page) {
   const info = await page.evaluate(() => ({ n: document.querySelectorAll('table').length, t: document.body?.innerText?.substring(0,200)||'' }));
   if (info.n >= 2) return;
   throw new Error('CF验证超时: ' + info.t.substring(0,100));
-}
-
-async function saveKV(result) {
-  const ts = new Date().toISOString();
-  const h = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
-  const base = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/`;
-
-  // 保存TXT内容（如果有的话）
-  if (result.txtContent && result.txtContent.length > 10) {
-    const r = await fetch(base + 'txt_content', { method:'PUT', headers:h, body: result.txtContent });
-    console.log(`  txt_content (${result.txtContent.length}字节): ${(await r.json()).success?'OK':'FAIL'}`);
-  } else {
-    // 清空旧内容
-    await fetch(base + 'txt_content', { method:'PUT', headers:h, body: '' });
-    console.log('  txt_content: 已清空（无有效内容）');
-  }
-
-  const entries = [
-    ['txt_link', result.txtUrl],
-    ['current_ip', result.ip],
-    ['last_update', ts],
-    ['channel_count', String(result.channelCount)],
-    ['region', result.region || ''],
-    ['ip_status', result.status || ''],
-    ['last_error', '']
-  ];
-  for (const [k,v] of entries) {
-    const r = await fetch(base+k, { method:'PUT', headers:h, body:v });
-    console.log(`  ${k}: ${(await r.json()).success?'OK':'FAIL'}`);
-  }
 }
 
 main().catch(e => { console.error('异常:',e); process.exit(1); });

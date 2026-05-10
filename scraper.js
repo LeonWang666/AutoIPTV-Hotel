@@ -1,12 +1,16 @@
 /**
- * IPTV TXT 接口自动抓取脚本 v14
+ * IPTV TXT 接口自动抓取脚本 v15
  * 
- * 关键发现：首页gotoIP的token和详情页TXT接口的token是不同的！
+ * 根本原因发现：
+ * 1. 首页gotoIP的token和详情页TXT接口的token是不同的！
+ * 2. 直接用URL导航到详情页会"验证失败"，必须从首页点击跳转
+ * 
  * 正确流程：
- * 1. 首页获取gotoIP token → 导航到详情页
- * 2. 从详情页提取TXT接口的token（s=参数）
- * 3. 用正确的token访问TXT接口获取频道内容
- * 4. 保存到KV
+ * 1. 首页获取gotoIP token
+ * 2. 在首页执行gotoIP()函数跳转到详情页
+ * 3. 从详情页提取TXT接口的token（s=参数）
+ * 4. 用正确的token访问TXT接口获取频道内容
+ * 5. 保存到KV
  */
 
 const puppeteer = require('puppeteer-extra');
@@ -20,7 +24,7 @@ const CF_API_TOKEN = process.env.CF_API_TOKEN;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function main() {
-  console.log('=== IPTV TXT 接口抓取 v14 ===');
+  console.log('=== IPTV TXT 接口抓取 v15 ===');
   console.log('时间:', new Date().toISOString());
 
   if (!CF_API_TOKEN) {
@@ -46,9 +50,10 @@ async function main() {
     await page.setViewport({ width: 1920, height: 1080 });
     page.setDefaultTimeout(90000);
 
-    // 禁止弹出窗口（广告），改为在新标签页打开
-    page.on('popup', async popup => {
-      try { await popup.close(); } catch (e) { }
+    // 禁止弹出窗口（广告），拦截新窗口
+    await page.evaluateOnNewDocument(() => {
+      // 覆盖window.open，阻止广告弹出
+      window.open = () => null;
     });
 
     console.log('[2/4] 访问首页...');
@@ -78,15 +83,14 @@ async function main() {
         if (m) {
           const status = cells.length >= 6 ? cells[5].textContent.trim() : '';
           const channelNum = cells.length >= 2 ? parseInt(cells[1].textContent.trim()) || 0 : 0;
-          const type = cells.length >= 3 ? cells[2].textContent.trim() : '';
-          results.push({ ip, token: m[1], type: m[2], status, channelNum, region: type });
+          results.push({ ip, token: m[1], type: m[2], status, channelNum });
         }
       }
       return results;
     });
     console.log(`首页找到 ${ipList.length} 个Multicast IP`);
 
-    // 过滤有效IP（非"暂时失效"，有频道数）
+    // 过滤有效IP
     const validIPs = ipList.filter(ip =>
       ip.status !== '暂时失效' && ip.token && ip.channelNum > 0
     ).sort((a, b) => b.channelNum - a.channelNum);
@@ -100,138 +104,99 @@ async function main() {
       process.exit(0);
     }
 
-    // 关键步骤：逐个点击IP链接进入详情页，获取正确的TXT接口token
-    console.log('\n[3/4] 点击IP链接进入详情页获取TXT接口token...');
+    // 关键步骤：在首页执行gotoIP()跳转到详情页
+    console.log('\n[3/4] 通过gotoIP()跳转详情页获取TXT接口token...');
     let bestContent = null;
     let bestCount = 0;
     let bestIP = '';
-
-    // 先回到首页（确保在首页）
-    await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
-    await waitForCF(page);
 
     for (let i = 0; i < validIPs.length && i < 3; i++) {
       const ip = validIPs[i];
       console.log(`\n尝试 ${i + 1}/3: ${ip.ip} (首页显示${ip.channelNum}个频道)`);
 
       try {
-        // 关键：模拟点击IP链接（而不是直接导航到URL）
-        // 这样浏览器会带上正确的referer和cookie
-        console.log('  点击IP链接...');
-        
-        // 找到对应的IP链接并点击
-        const clicked = await page.evaluate((targetIp) => {
-          const tables = document.querySelectorAll('table');
-          if (tables.length < 2) return false;
-          const rows = tables[1].querySelectorAll('tbody tr');
-          for (const row of rows) {
-            const a = row.querySelector('td a');
-            if (a && a.textContent.trim() === targetIp) {
-              a.click();
-              return true;
-            }
-          }
-          return false;
-        }, ip.ip);
-
-        if (!clicked) {
-          console.log('  ❌ 未找到IP链接');
-          continue;
+        // 确保在首页
+        if (!page.url().includes('iptv.cqshushu.com/index.php') || page.url().includes('p=')) {
+          console.log('  回到首页...');
+          await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
+          await waitForCF(page);
         }
 
-        // 等待页面跳转（点击后会在当前页面跳转到详情页）
+        // 在首页执行gotoIP()函数（这会触发页面跳转到详情页）
+        console.log(`  执行gotoIP('${ip.token}', '${ip.type}')...`);
+        await page.evaluate((token, type) => {
+          if (typeof gotoIP === 'function') {
+            gotoIP(token, type);
+          } else {
+            // 如果gotoIP不存在，手动设置location
+            window.location.href = `index.php?p=${token}&t=${type}`;
+          }
+        }, ip.token, ip.type);
+
+        // 等待页面跳转到详情页
         await page.waitForFunction(() => {
-          const url = window.location.href;
-          return url.includes('p=') && url.includes('t=');
-        }, { timeout: 15000 }).catch(() => null);
-        await sleep(3000); // 等待详情页JS渲染
+          return window.location.href.includes('p=') && window.location.href.includes('t=');
+        }, { timeout: 15000 });
+        await sleep(3000);
 
-        // 关闭可能弹出的广告窗口
-        const pages = await browser.pages();
-        for (const p of pages) {
-          if (p !== page) {
-            try { await p.close(); } catch (e) { }
-          }
-        }
-
-        // 调试：输出详情页信息
         const debugInfo = await page.evaluate(() => ({
           url: window.location.href,
           title: document.title,
           linkCount: document.querySelectorAll('a').length,
           bodyPreview: document.body?.innerText?.substring(0, 200) || ''
         }));
-        console.log(`  详情页: URL=${debugInfo.url}`);
-        console.log(`  标题: ${debugInfo.title}`);
+        console.log(`  详情页: ${debugInfo.title}`);
+        console.log(`  URL: ${debugInfo.url}`);
         console.log(`  链接数: ${debugInfo.linkCount}`);
-        console.log(`  内容预览: ${debugInfo.bodyPreview.substring(0, 120)}`);
+        console.log(`  预览: ${debugInfo.bodyPreview.substring(0, 120)}`);
 
         if (debugInfo.title.includes('验证失败') || debugInfo.bodyPreview.includes('请求失败')) {
-          console.log('  ❌ 详情页验证失败，回到首页重试');
-          await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
-          await waitForCF(page);
+          console.log('  ❌ 详情页验证失败');
           continue;
         }
 
-        // 等待详情页内容加载
+        // 等待TXT链接出现
         try {
           await page.waitForFunction(() => {
             const body = document.body?.innerText || '';
-            return body.includes('TXT') || body.includes('频道列表') || body.includes('下载');
+            return body.includes('TXT接口') || body.includes('TXT下载') || body.includes('download=txt');
           }, { timeout: 10000 });
         } catch (e) {
-          console.log('  等待详情页内容超时');
+          console.log('  等待TXT链接超时');
         }
 
-        // 从详情页提取TXT接口的token
+        // 提取TXT接口URL
         const txtInfo = await page.evaluate(() => {
           const links = document.querySelectorAll('a');
-          const results = [];
           for (const a of links) {
             const onclick = a.getAttribute('onclick') || '';
             const text = a.textContent.trim();
-            const href = a.getAttribute('href') || '';
-            results.push({ text: text.substring(0, 30), onclick: onclick.substring(0, 100), href: href.substring(0, 100) });
-            // 查找"🔗 TXT接口"链接
             if (text.includes('TXT接口') && onclick.includes('copyToClipboard')) {
               const m = onclick.match(/copyToClipboard\(['"]([^'"]+)['"]\)/);
-              if (m) {
-                return { txtUrl: m[1], found: true };
-              }
+              if (m) return { txtUrl: m[1], found: true };
             }
-            // 也查找TXT下载链接
-            if (text.includes('TXT') && href.includes('format=txt')) {
-              return { txtUrl: 'https://iptv.cqshushu.com/index.php' + href, found: true };
-            }
-            // 也查找TXT下载链接（download=txt）
-            if (text.includes('TXT') && href.includes('download=txt')) {
+            const href = a.getAttribute('href') || '';
+            if ((text.includes('TXT') || text.includes('txt')) && (href.includes('format=txt') || href.includes('download=txt'))) {
               return { txtUrl: 'https://iptv.cqshushu.com/index.php' + href.replace('download=txt', 'format=txt'), found: true };
             }
           }
-          // 备选：查找所有包含s=参数的链接
           for (const a of links) {
             const href = a.getAttribute('href') || '';
             if (href.includes('s=') && (href.includes('format=txt') || href.includes('download=txt'))) {
               return { txtUrl: 'https://iptv.cqshushu.com/index.php' + href.replace('download=txt', 'format=txt'), found: true };
             }
           }
-          return { found: false, allLinks: results.slice(0, 15) };
+          return { found: false };
         });
 
-        if (!txtInfo || !txtInfo.found) {
+        if (!txtInfo.found) {
           console.log('  ❌ 未找到TXT接口链接');
-          if (txtInfo && txtInfo.allLinks) {
-            console.log(`  页面链接列表:`);
-            for (const link of txtInfo.allLinks) {
-              console.log(`    [${link.text}] onclick=${link.onclick} href=${link.href}`);
-            }
-          }
           continue;
         }
 
         console.log(`  TXT接口URL: ${txtInfo.txtUrl}`);
 
-        // 用正确的token访问TXT接口
+        // 访问TXT接口
         await page.goto(txtInfo.txtUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
         await sleep(2000);
 
@@ -239,7 +204,7 @@ async function main() {
         const lines = txtContent.split('\n').filter(l => l.trim() && !l.startsWith('#'));
         const channelCount = lines.length;
 
-        console.log(`  内容前100字符: ${txtContent.substring(0, 100)}`);
+        console.log(`  预览: ${txtContent.substring(0, 100)}`);
         console.log(`  频道行数: ${channelCount}`);
 
         if (channelCount > 0 && txtContent.includes('http')) {
@@ -258,14 +223,7 @@ async function main() {
         }
 
       } catch (err) {
-        console.log(`  ❌ 访问失败: ${err.message}`);
-      }
-
-      // 回到首页准备下一次点击
-      if (i < validIPs.length - 1 && i < 2 && !bestContent) {
-        console.log('  回到首页...');
-        await page.goto('https://iptv.cqshushu.com/index.php', { waitUntil: 'networkidle2', timeout: 60000 });
-        await waitForCF(page);
+        console.log(`  ❌ 失败: ${err.message}`);
       }
     }
 
@@ -285,7 +243,7 @@ async function main() {
         ['current_ip', bestIP],
         ['total_ips', String(validIPs.length)],
         ['last_error', ''],
-        ['scrape_version', 'v14']
+        ['scrape_version', 'v15']
       ];
       for (const [k, v] of meta) {
         const r = await fetch(base + k, { method: 'PUT', headers: h, body: v });
@@ -298,7 +256,7 @@ async function main() {
         ['last_update', ts],
         ['channel_count', '0'],
         ['last_error', ts + ': 所有IP均返回0频道'],
-        ['scrape_version', 'v14']
+        ['scrape_version', 'v15']
       ];
       for (const [k, v] of meta) {
         await fetch(base + k, { method: 'PUT', headers: h, body: v });

@@ -223,9 +223,17 @@ async function findM3U(dp) {
     return null;
   });
   if (chUrl) {
-    console.log('进频道列表...');
+    console.log('进频道列表:', chUrl);
     await dp.goto(chUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await sleep(3000);
+    // 调试：打印页面所有链接
+    const allLinks = await dp.evaluate(() => {
+      return Array.from(document.querySelectorAll('a')).map(l => ({
+        text: l.textContent.trim().substring(0, 50),
+        href: l.href.substring(0, 150)
+      })).filter(l => l.href.startsWith('http'));
+    });
+    console.log('频道列表页链接:', JSON.stringify(allLinks, null, 2));
     url = await dp.evaluate(() => {
       for (const l of document.querySelectorAll('a')) {
         if (l.textContent.includes('M3U') || l.textContent.includes('m3u')) {

@@ -296,7 +296,7 @@ async function main() {
         ['current_ip', bestIP],
         ['total_ips', String(validIPs.length)],
         ['last_error', ''],
-        ['scrape_version', 'v16']
+        ['scrape_version', 'v17']
       ];
       for (const [k, v] of meta) {
         const r = await fetch(base + k, { method: 'PUT', headers: h, body: v });
@@ -304,17 +304,11 @@ async function main() {
       }
       console.log(`\n=== 成功! ${bestCount} 个频道, 来源IP: ${bestIP} ===`);
     } else {
-      console.log('  ⚠️ 未能获取到频道内容');
-      const meta = [
-        ['last_update', ts],
-        ['channel_count', '0'],
-        ['last_error', ts + ': 所有IP均返回0频道'],
-        ['scrape_version', 'v15']
-      ];
-      for (const [k, v] of meta) {
-        await fetch(base + k, { method: 'PUT', headers: h, body: v });
-      }
-      console.log('=== 失败: 0频道 ===');
+      console.log('  ⚠️ 未能获取到频道内容，保留上次有效数据');
+      // 不覆盖 KV 中的有效数据，只记录错误
+      const r = await fetch(base + 'last_error', { method: 'PUT', headers: h, body: ts + ': 所有IP均返回0频道（已保留上次数据）' });
+      console.log(`  last_error: ${(await r.json()).success ? 'OK' : 'FAIL'}`);
+      console.log('=== 跳过更新（保留上次数据）===');
     }
 
   } catch (error) {
@@ -363,4 +357,5 @@ async function waitForCF(page) {
 }
 
 main().catch(e => { console.error('异常:', e); process.exit(1); });
+
 

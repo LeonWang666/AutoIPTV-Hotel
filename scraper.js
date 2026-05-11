@@ -274,6 +274,18 @@ async function main() {
     const h = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
     const base = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/`;
 
+    // 保存 IP 列表到 KV（供管理后台使用）
+    const ipListForAdmin = validIPs.map(ip => ({
+      ip: ip.ip,
+      token: ip.token,
+      type: ip.type,
+      ch: ip.channelNum,
+      region: ip.region,
+      status: ip.status
+    }));
+    const r0 = await fetch(base + 'ip_list', { method: 'PUT', headers: h, body: JSON.stringify(ipListForAdmin) });
+    console.log(`  ip_list (${ipListForAdmin.length}个IP): ${(await r0.json()).success ? 'OK' : 'FAIL'}`);
+
     if (bestContent && bestCount > 0) {
       const r1 = await fetch(base + 'txt_content', { method: 'PUT', headers: h, body: bestContent });
       console.log(`  txt_content (${bestContent.length}字节, ${bestCount}频道): ${(await r1.json()).success ? 'OK' : 'FAIL'}`);
@@ -284,7 +296,7 @@ async function main() {
         ['current_ip', bestIP],
         ['total_ips', String(validIPs.length)],
         ['last_error', ''],
-        ['scrape_version', 'v15']
+        ['scrape_version', 'v16']
       ];
       for (const [k, v] of meta) {
         const r = await fetch(base + k, { method: 'PUT', headers: h, body: v });
@@ -351,3 +363,4 @@ async function waitForCF(page) {
 }
 
 main().catch(e => { console.error('异常:', e); process.exit(1); });
+

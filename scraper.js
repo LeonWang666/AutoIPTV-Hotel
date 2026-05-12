@@ -299,8 +299,7 @@ async function main() {
     // 保存到KV
     console.log('\n[4/4] 保存到KV...');
     const ts = new Date().toISOString();
-    const h = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
-    const base = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/`;
+    // h 和 base 已在前面声明，这里复用
 
     // 保存 IP 列表到 KV（供管理后台使用）
     const ipListForAdmin = validIPs.map(ip => ({
@@ -343,9 +342,9 @@ async function main() {
     console.error('抓取失败:', error.message);
     console.error(error.stack);
     try {
-      const h = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
+      const errH = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
       await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/last_error`, {
-        method: 'PUT', headers: h,
+        method: 'PUT', headers: errH,
         body: new Date().toISOString() + ': ' + error.message
       });
     } catch (e) { }

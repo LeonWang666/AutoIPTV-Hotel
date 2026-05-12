@@ -104,7 +104,35 @@ async function main() {
       process.exit(0);
     }
 
-    // 关键步骤：在首页执行gotoIP()跳转到详情页
+    // 检查 KV 中是否有用户指定的 IP（从管理后台手动选择）
+    const h = { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'text/plain' };
+    const base = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/`;
+    let selectedIP = null;
+    try {
+      const selRes = await fetch(base + 'selected_ip');
+      if (selRes.ok) {
+        selectedIP = (await selRes.text()).trim();
+        if (selectedIP) {
+          console.log(`\n  ⭐ 用户指定IP: ${selectedIP}`);
+          // 将指定IP移到列表最前面
+          const idx = validIPs.findIndex(ip => ip.ip === selectedIP);
+          if (idx >= 0) {
+            const [target] = validIPs.splice(idx, 1);
+            validIPs.unshift(target);
+            console.log(`  已将 ${selectedIP} 移到首位`);
+          } else {
+            console.log(`  ⚠️ 指定IP ${selectedIP} 不在有效列表中，使用默认排序`);
+            selectedIP = null;
+          }
+          // 清除选择（一次性）
+          await fetch(base + 'selected_ip', { method: 'DELETE' });
+        }
+      }
+    } catch (e) {
+      console.log('  读取selected_ip失败，使用默认排序');
+    }
+
+    // 关键步骤：在首页执行gotoIP()跳转详情页
     console.log('\n[3/4] 通过gotoIP()跳转详情页获取TXT接口token...');
     let bestContent = null;
     let bestCount = 0;
@@ -357,5 +385,6 @@ async function waitForCF(page) {
 }
 
 main().catch(e => { console.error('异常:', e); process.exit(1); });
+
 
 

@@ -2,8 +2,8 @@ name: IPTV M3U Scraper
 
 on:
   schedule:
-    # 每小时运行一次
-    - cron: '0 * * * *'
+    # 每2小时运行一次
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 jobs:
@@ -35,3 +35,4 @@ jobs:
         run: |
           echo "=== 抓取完成 ==="
           echo "完成时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+

@@ -139,9 +139,11 @@ async function main() {
     let bestCount = 0;
     let bestIP = '';
 
-    for (let i = 0; i < validIPs.length && i < 3; i++) {
+    // 如果用户指定了IP，只尝试那个IP；否则尝试前3个
+    const maxAttempts = selectedIP ? 1 : 3;
+    for (let i = 0; i < validIPs.length && i < maxAttempts; i++) {
       const ip = validIPs[i];
-      console.log(`\n尝试 ${i + 1}/3: ${ip.ip} (首页显示${ip.channelNum}个频道)`);
+      console.log(`\n尝试 ${i + 1}/${maxAttempts}: ${ip.ip} (首页显示${ip.channelNum}个频道)${selectedIP ? ' [用户指定]' : ''}`);
 
       try {
         // 确保在首页

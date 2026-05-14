@@ -162,10 +162,14 @@ async function main() {
         }, ip.token, ip.type);
 
         // 等待页面跳转到详情页
-        await page.waitForFunction(() => {
-          return window.location.href.includes('p=') && window.location.href.includes('t=');
-        }, { timeout: 15000 });
-        await sleep(3000);
+        try {
+          await page.waitForFunction(() => {
+            return window.location.href.includes('p=') && window.location.href.includes('t=');
+          }, { timeout: 20000 });
+        } catch (e) {
+          console.log('  等待页面跳转超时，继续执行');
+        }
+        await sleep(5000);
 
         const debugInfo = await page.evaluate(() => ({
           url: window.location.href,
@@ -190,12 +194,12 @@ async function main() {
           await page.waitForFunction(() => {
             const body = document.body?.innerText || '';
             return body.includes('查看频道列表') || body.includes('TXT') || body.includes('下载');
-          }, { timeout: 15000 });
+          }, { timeout: 20000 });
         } catch (e) {
           console.log('  等待详情页基础内容超时');
         }
 
-        await sleep(3000); // 额外等待AJAX
+        await sleep(5000); // 额外等待AJAX
 
         // 尝试点击"📺 查看频道列表"按钮（如果存在）
         try {
@@ -211,7 +215,7 @@ async function main() {
           });
           if (clickedChannelList) {
             console.log('  点击了"查看频道列表"');
-            await sleep(5000); // 等待频道列表加载
+            await sleep(8000); // 等待频道列表加载
           }
         } catch (e) { }
 
@@ -384,6 +388,7 @@ async function waitForCF(page) {
 }
 
 main().catch(e => { console.error('异常:', e); process.exit(1); });
+
 
 
 

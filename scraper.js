@@ -83,7 +83,8 @@ async function main() {
         if (m) {
           const status = cells.length >= 6 ? cells[5].textContent.trim() : '';
           const channelNum = cells.length >= 2 ? parseInt(cells[1].textContent.trim()) || 0 : 0;
-          results.push({ ip, token: m[1], type: m[2], status, channelNum });
+          const region = cells.length >= 3 ? cells[2].textContent.trim() : '';
+          results.push({ ip, token: m[1], type: m[2], status, channelNum, region });
         }
       }
       return results;
@@ -388,6 +389,7 @@ async function waitForCF(page) {
 }
 
 main().catch(e => { console.error('异常:', e); process.exit(1); });
+
 
 
 

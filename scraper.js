@@ -110,7 +110,7 @@ async function main() {
     const base = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_NAMESPACE_ID}/values/`;
     let selectedIP = null;
     try {
-      const selRes = await fetch(base + 'selected_ip');
+      const selRes = await fetch(base + 'selected_ip', { headers: h });
       if (selRes.ok) {
         selectedIP = (await selRes.text()).trim();
         if (selectedIP) {
@@ -126,7 +126,7 @@ async function main() {
             selectedIP = null;
           }
           // 清除选择（一次性）
-          await fetch(base + 'selected_ip', { method: 'DELETE' });
+          await fetch(base + 'selected_ip', { method: 'DELETE', headers: h });
         }
       }
     } catch (e) {
